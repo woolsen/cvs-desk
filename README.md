@@ -5,11 +5,23 @@
 # CVS Desk
 
 [![CI](https://github.com/woolsen/cvs-desk/actions/workflows/ci.yml/badge.svg)](https://github.com/woolsen/cvs-desk/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/woolsen/cvs-desk)](https://github.com/woolsen/cvs-desk/releases/latest)
 
 CVS Desk is a Windows desktop front end for CVS, written in Rust with egui. It ships with its
 own CVS client, so the desktop program does not need an external `cvs.exe`.
 
 ![CVS Desk main window](docs/screenshots/main.png)
+
+## Download
+
+Prebuilt binaries for Windows 10 and 11 are on the
+[releases page](https://github.com/woolsen/cvs-desk/releases/latest). Download the
+`windows-x64.zip`, extract it anywhere, and run `cvsdesk.exe`. The `cvs.exe` beside it is the
+standalone command-line client. The zip also contains `LICENSE` and `third-party-licenses.txt`,
+the full license texts for CVS Desk and its dependencies.
+
+The build is not code-signed yet, so Windows SmartScreen may warn about it. Each release
+includes `SHA256SUMS.txt` for checking the download.
 
 ## Features
 
@@ -17,8 +29,8 @@ own CVS client, so the desktop program does not need an external `cvs.exe`.
 - Update, commit, diff, log, status, annotate, history, tag, and branch operations.
 - Revision graph and tag browser.
 - Checkout, import, release, and repository browsing.
-- Built-in `cvs` client with `:pserver:` and `:ext:` support, `.cvspass`, the Windows CVSNT
-  password store, `~/.cvsrc`, and `Gzip-stream` compression.
+- Built-in `cvs` client with `:pserver:` and `:ext:` support, `.cvspass`, `~/.cvsrc`, and
+  Gzip-stream compression.
 - Reads GBK and UTF-8 control files, so Chinese file names work.
 - Works without a server by opening a generated sample working copy.
 
@@ -26,34 +38,22 @@ own CVS client, so the desktop program does not need an external `cvs.exe`.
 |---|---|
 | ![Revision graph](docs/screenshots/graph.png) | ![Preferences](docs/screenshots/preferences.png) |
 
-## Requirements
-
-- Windows 10 or 11
-- Rust stable with the MSVC toolchain
-- A CVS server for network operations
-
 ## Build
+
+Building needs Rust stable with the MSVC toolchain:
 
 ```text
 cargo build --release
 ```
 
-This produces two programs in `target\release`:
-
-| Program | Purpose |
-|---|---|
-| `cvsdesk.exe` | The desktop application. |
-| `cvs.exe` | A standalone CVS client. Put it on `PATH` if you want to run it from a console. |
-
-## Run
+This produces `cvsdesk.exe` and `cvs.exe` in `target\release`.
 
 ```text
 cargo run --release
 ```
 
-The program remembers the last folder it opened. With no folder argument and no previous
-folder, it creates a sample working copy under the system temp folder. You can also pass a
-folder directly:
+With no folder argument and no previous folder, the program opens a generated sample working
+copy. Pass a folder to open it directly:
 
 ```text
 cargo run --release -- C:\work\my-project
@@ -65,39 +65,16 @@ Settings are stored in `cvsdesk-settings.toml` next to the executable.
 
 ```text
 cargo test
-cargo test --test cvs_client
 ```
 
 The client test runs the real `cvs.exe` against an in-process pserver, so it needs no network
-and no account.
-
-The optional test against a real working copy is read-only and never runs `cvs`:
-
-```text
-set CVSDESK_REAL_FOLDER=C:\work\my-project
-cargo test --test real_folder -- --ignored --nocapture
-```
-
-See `tests/README.md` for details.
-
-## Layout
-
-```text
-src/core/     rules: control-file decoding, file states, settings, revision graph
-src/client/   protocol and working-copy implementation used by the cvs program
-src/app/      egui window, dialogs, and actions
-tests/        integration tests
-tools/        development helpers (the GBK table generator)
-```
-
-Rules belong in `src/core/` with tests beside them. The window is a thin layer over the
-library, so it can be tested without opening a window.
+or account. See `tests/README.md` for the optional test against a real working copy.
 
 ## Contributing
 
-See `CONTRIBUTING.md`. Bug reports and feature requests are welcome. Code contributions
-require a signed contributor license agreement so the project can also be offered under
-different commercial terms.
+See `CONTRIBUTING.md`. Bug reports and feature requests are welcome. Code contributions require
+a signed contributor license agreement so the project can also be offered under different
+commercial terms.
 
 ## License
 
