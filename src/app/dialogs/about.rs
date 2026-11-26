@@ -4,7 +4,8 @@ use super::DialogAction;
 use crate::app::ui::wrap;
 
 const COPYRIGHT: &str = "Copyright (C) 2026 woolsen";
-const LICENSE: &str = "Licensed under the GNU AGPL v3.0 only. No warranty.";
+const LICENSE: &str =
+    "GNU AGPL v3.0 only: you may convey and modify this work under that license. No warranty.";
 const LICENSE_URL: &str = "https://www.gnu.org/licenses/agpl-3.0.html";
 
 pub(super) fn show(
