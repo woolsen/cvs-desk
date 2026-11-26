@@ -43,6 +43,10 @@ toml = "0.8"
 # Reads the message font and FontLink; safe bindings only.
 winreg = "0.56"
 
+[build-dependencies]
+# Compiles the icon resource into the executables, so Explorer shows the logo.
+embed-resource = "3"
+
 [[bin]]
 name = "cvsdesk"
 path = "src/main.rs"

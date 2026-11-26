@@ -8,6 +8,22 @@ mod app;
 
 use std::path::PathBuf;
 
+/// The logo the running window shows in its title bar, on the taskbar and in Alt-Tab.
+///
+/// That is a separate thing from the icon Explorer draws for the file: this one is set on
+/// the window at run time, the other is a resource compiled into the executable by
+/// `build.rs`. Both come from the same artwork.
+fn window_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(include_bytes!("../assets/cvsdesk-256.png")).ok()?;
+    let image = image.to_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 fn main() -> eframe::Result<()> {
     let mut shot: Option<String> = None;
     let mut start: Option<PathBuf> = None;
@@ -56,6 +72,10 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([1020.0, 680.0])
         .with_min_inner_size([680.0, 420.0])
         .with_title("CVS Desk");
+
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
 
     if shot.is_some() {
         // Open without taking focus, and on Windows below other windows, so a check never

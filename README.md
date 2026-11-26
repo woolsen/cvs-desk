@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/cvsdesk-256.png" width="112" alt="CVS Desk">
+</p>
+
 # CVS Desk
 
 [![CI](https://github.com/woolsen/cvs-desk/actions/workflows/ci.yml/badge.svg)](https://github.com/woolsen/cvs-desk/actions/workflows/ci.yml)

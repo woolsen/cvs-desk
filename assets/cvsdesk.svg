@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="CVS Desk">
+  <title>CVS Desk</title>
+  <!-- rounded tile -->
+  <rect width="1024" height="1024" rx="230" fill="#202230"/>
+  <!-- geometric C: squared arms, large outer left radius, rounded terminals -->
+  <path fill="#FBF3DF" d="M380.67 168.67H758.67A95.33 95.33 0 0 1 758.67 359.33H410.63A53.33 53.33 0 0 0 357.3 412.67V610A53.33 53.33 0 0 0 410.63 663.33H758.67A95.33 95.33 0 0 1 758.67 854H380.67A213.34 213.34 0 0 1 167.33 640.67V382A213.34 213.34 0 0 1 380.67 168.67Z"/>
+  <!-- amber commit node on the lower terminal -->
+  <circle cx="758.67" cy="758.67" r="95.33" fill="#FFBB2E"/>
+</svg>
