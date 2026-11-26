@@ -1,0 +1,29 @@
+CVS Desk license notices
+========================
+
+This file lists the license terms of CVS Desk and the third-party Rust crates
+it uses. Each component remains under its own license.
+
+License summary
+---------------
+
+{{#each overview}}
+* {{{name}}} ({{count}})
+{{/each}}
+
+License texts
+-------------
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+--------------------------------------------------------------------------------
+
+Used by:
+{{#each used_by}}
+* {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

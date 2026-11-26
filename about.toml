@@ -1,0 +1,33 @@
+# Configures `cargo about`, which generates the license notices shipped in a
+# release. The list is the licenses this project accepts; generation fails if a
+# dependency adds one that is missing here.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "OFL-1.1",
+    "LicenseRef-UFL-1.0",
+    "Unicode-3.0",
+    "Zlib",
+    # The project itself, so the generated notices are self-contained.
+    "AGPL-3.0-only",
+]
+
+targets = ["x86_64-pc-windows-msvc"]
+
+# Test and build dependencies are not part of the distributed program.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# egui embeds the Ubuntu font, whose licence text sits in the font folder and
+# is not found by the automatic scan.
+[epaint_default_fonts.clarify]
+license = "(MIT OR Apache-2.0) AND OFL-1.1 AND LicenseRef-UFL-1.0"
+
+[[epaint_default_fonts.clarify.files]]
+path = "fonts/UFL.txt"
+license = "LicenseRef-UFL-1.0"
+checksum = "2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002"

@@ -50,6 +50,14 @@ The workflow:
 Verify the release page, download the zip, and compare its SHA-256 with
 `SHA256SUMS.txt`.
 
+## License notices
+
+`about.toml` lists the licenses the project accepts and pins the one license text that
+cargo-about cannot find by itself (the Ubuntu font licence inside `epaint_default_fonts`).
+The release workflow runs `cargo about generate` and puts `third-party-licenses.txt` in the
+zip. When a dependency adds a new license, generation fails; check its terms and add it to
+`accepted` before releasing.
+
 ## If a release is wrong
 
 Do not move or replace a published tag. Fix the problem, bump the patch version, and

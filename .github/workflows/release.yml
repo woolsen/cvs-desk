@@ -49,10 +49,22 @@ jobs:
       - name: Install cargo-about
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-about
+          # 0.9.1 is the last release that emits clarified LicenseRef texts;
+          # 0.9.2 and 0.9.3 drop them (EmbarkStudios/cargo-about#329).
+          tool: cargo-about@0.9.1
 
       - name: Generate license notices
-        run: cargo about generate --output third-party-licenses.txt about.hbs
+        run: cargo about generate --locked --output-file third-party-licenses.txt about.hbs
+
+      - name: Check the license notices
+        shell: pwsh
+        run: |
+          $text = Get-Content third-party-licenses.txt -Raw
+          foreach ($license in @("GNU AFFERO GENERAL PUBLIC LICENSE", "UBUNTU FONT LICENCE")) {
+            if (-not $text.Contains($license)) {
+              throw "third-party-licenses.txt is missing: $license"
+            }
+          }
 
       - name: Smoke-test the programs
         shell: pwsh
