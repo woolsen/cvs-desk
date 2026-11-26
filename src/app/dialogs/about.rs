@@ -3,6 +3,7 @@
 use super::DialogAction;
 use crate::app::ui::wrap;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const COPYRIGHT: &str = "Copyright (C) 2026 woolsen";
 const LICENSE: &str =
     "GNU AGPL v3.0 only: you may convey and modify this work under that license. No warranty.";
@@ -24,6 +25,7 @@ pub(super) fn show(
         .default_width(560.0)
         .show(ctx, |ui| {
             ui.label(egui::RichText::new("CVS Desk").strong());
+            ui.label(format!("Version {}", VERSION));
             ui.label("A desktop front end for CVS (version control).");
             ui.label(COPYRIGHT);
             ui.horizontal_wrapped(|ui| {
@@ -84,5 +86,10 @@ mod tests {
         assert!(COPYRIGHT.contains("woolsen"));
         assert!(LICENSE.contains("AGPL"));
         assert!(LICENSE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn the_about_box_carries_a_version() {
+        assert!(VERSION.split('.').count() >= 2);
     }
 }

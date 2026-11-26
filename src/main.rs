@@ -32,10 +32,12 @@ fn main() -> eframe::Result<()> {
     let mut show_tags = false;
     let mut show_about = false;
     let mut show_fonts = false;
+    let mut show_version = false;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--version" | "-V" => show_version = true,
             "--screenshot" => {
                 if i + 1 < args.len() {
                     shot = Some(args[i + 1].clone());
@@ -59,6 +61,11 @@ fn main() -> eframe::Result<()> {
             _ => {}
         }
         i += 1;
+    }
+
+    if show_version {
+        println!("CVS Desk {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
     }
 
     if show_fonts {
