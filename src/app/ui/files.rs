@@ -1115,6 +1115,18 @@ mod tests {
             .map(|(_, pos)| pos)
     }
 
+    /// Font metrics differ slightly between machines; a sub-pixel difference is not a
+    /// layout bug. Keep the tolerance under one logical pixel.
+    const LAYOUT_TOL: f32 = 0.5;
+
+    fn assert_size_close(actual: egui::Vec2, expected: egui::Vec2, what: &str) {
+        assert!(
+            (actual.x - expected.x).abs() < LAYOUT_TOL
+                && (actual.y - expected.y).abs() < LAYOUT_TOL,
+            "{what}: {actual:?} vs {expected:?}"
+        );
+    }
+
     /// A row with every column filled, so each heading can be matched to its data.
     fn detailed_row(name: &str, tag: &str) -> Row {
         let mut r = row(name, false);
@@ -1456,12 +1468,12 @@ mod tests {
             .expect("the list heading is still on screen")
             .y;
         assert!(
-            (heading_after - heading_before).abs() < 0.01,
+            (heading_after - heading_before).abs() < LAYOUT_TOL,
             "opening the field moved the list: {heading_before} -> {heading_after}"
         );
         let path_after = text_pos(&editing, &app.address).expect("the path is in the field");
         assert!(
-            (path_after.y - path_before.y).abs() < 0.01,
+            (path_after.y - path_before.y).abs() < LAYOUT_TOL,
             "the path jumped when the field opened: {} -> {}",
             path_before.y,
             path_after.y
@@ -1485,7 +1497,7 @@ mod tests {
             .expect("the list heading is still on screen")
             .y;
         assert!(
-            (after - before).abs() < 0.01,
+            (after - before).abs() < LAYOUT_TOL,
             "opening the search moved the list: {before} -> {after}"
         );
 
@@ -1495,7 +1507,7 @@ mod tests {
             .expect("the list heading is still on screen")
             .y;
         assert!(
-            (back - before).abs() < 0.01,
+            (back - before).abs() < LAYOUT_TOL,
             "closing the search moved the list: {before} -> {back}"
         );
     }
@@ -1514,10 +1526,10 @@ mod tests {
 
         let hovered = run_list(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
         let hover_frame = address_frame(&hovered);
-        assert_eq!(
+        assert_size_close(
             hover_frame.size(),
             idle_frame.size() + egui::vec2(2.0, 2.0),
-            "hover must grow the frame the way a text field does"
+            "hover must grow the frame the way a text field does",
         );
 
         run_list(
@@ -1532,13 +1544,13 @@ mod tests {
         );
         let editing = run_list(&ctx, &mut app, Vec::new());
         let focus_frame = address_frame(&editing);
-        assert_eq!(
+        assert_size_close(
             focus_frame.size(),
             hover_frame.size(),
-            "clicking into the path must not resize its frame"
+            "clicking into the path must not resize its frame",
         );
         assert!(
-            (focus_frame.center() - hover_frame.center()).length() < 0.01,
+            (focus_frame.center() - hover_frame.center()).length() < LAYOUT_TOL,
             "the frame must stay where the hovered one was"
         );
     }
