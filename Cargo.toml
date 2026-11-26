@@ -1,0 +1,57 @@
+[package]
+name = "cvsdesk"
+version = "0.1.0"
+edition = "2021"
+default-run = "cvsdesk"
+authors = ["woolsen <woolsen@qq.com>"]
+description = "A Windows desktop front end for CVS with a built-in CVS client."
+license = "AGPL-3.0-only"
+repository = "https://github.com/woolsen/cvs-desk"
+readme = "README.md"
+keywords = ["cvs", "version-control", "gui", "windows"]
+categories = ["development-tools", "gui"]
+
+# The rules live in a library so they can be tested without opening a window: the window
+# program is a thin layer on top of it.
+[lib]
+name = "cvsdesk"
+path = "src/lib.rs"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+# Remix Icon as a font: the browser's file-type icons, with no image assets to ship.
+egui-remixicon = "0.29.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+chrono = "0.4"
+rfd = "0.18.0"
+# The cvs client writes control files in the working copy's own code page (GBK here), so it
+# needs exact decoding *and* encoding; the GUI table is decode-only.
+encoding_rs = "0.8"
+# Finds the face index inside a .ttc and tells whether a face covers a character.
+ttf-parser = "0.25"
+# How many character cells text takes: a Chinese letter is two cells, a Latin one is one.
+unicode-width = "0.1"
+# `cvs -z`: the client/server protocol's gzip stream (Gzip-stream), and the tests that play
+# the other end of it.
+flate2 = "1"
+# The settings file is TOML: the standard crate keeps hand edits and the program's own
+# escaping and lists in agreement.
+toml = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+# Reads the message font and FontLink; safe bindings only.
+winreg = "0.56"
+
+[[bin]]
+name = "cvsdesk"
+path = "src/main.rs"
+
+# The command-line CVS client this project builds. It is a second program, not part of the
+# window: the desktop program runs it, and so can anyone who puts it on PATH.
+[[bin]]
+name = "cvs"
+path = "src/bin/cvs/main.rs"
+
+[profile.release]
+opt-level = 2

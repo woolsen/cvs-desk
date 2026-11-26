@@ -1,0 +1,18 @@
+/target
+/shots
+__pycache__/
+*.pyc
+
+# Local agent configuration.
+/AGENTS.md
+
+# Settings are written next to the executable.
+/cvsdesk-settings.toml
+/cvsdesk-settings.txt
+
+# Never commit real CVS connection details.
+*.cvsroot
+/tests/local.env
+
+# Local build output.
+/cargo.pdb

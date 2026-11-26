@@ -1,0 +1,782 @@
+//! The file list's view model: filters, sort order, selection and the state sheet.
+
+use std::cmp::Ordering;
+use std::path::Path;
+
+use cvsdesk::entries::{self, Origin, Row, State};
+use cvsdesk::prefs::ViewState;
+
+use crate::app::App;
+
+#[derive(Clone)]
+pub(super) struct Filters {
+    pub(super) unchanged: bool,
+    pub(super) changed: bool,
+    pub(super) added: bool,
+    pub(super) removed: bool,
+    pub(super) conflicts: bool,
+    pub(super) unknown: bool,
+    pub(super) hide_unknown: bool,
+    pub(super) missing: bool,
+    pub(super) hide_missing: bool,
+    pub(super) folders: bool,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Self {
+            unchanged: true,
+            changed: true,
+            added: true,
+            removed: true,
+            conflicts: true,
+            unknown: true,
+            hide_unknown: false,
+            missing: true,
+            hide_missing: false,
+            folders: true,
+        }
+    }
+}
+
+impl Filters {
+    /// The switches the user chose last time, as saved in the settings file.
+    pub(super) fn from_view(view: &ViewState) -> Self {
+        Self {
+            unchanged: view.show_unchanged,
+            changed: view.show_modified,
+            added: view.show_added,
+            removed: view.show_removed,
+            conflicts: view.show_conflicts,
+            unknown: view.show_unknown,
+            hide_unknown: view.hide_unknown,
+            missing: view.show_missing,
+            hide_missing: view.hide_missing,
+            folders: view.show_folders,
+        }
+    }
+
+    /// Copy the switches into the settings draft without touching its sort fields.
+    pub(super) fn write_view(&self, view: &mut ViewState) {
+        view.show_unchanged = self.unchanged;
+        view.show_modified = self.changed;
+        view.show_added = self.added;
+        view.show_removed = self.removed;
+        view.show_conflicts = self.conflicts;
+        view.show_unknown = self.unknown;
+        view.hide_unknown = self.hide_unknown;
+        view.show_missing = self.missing;
+        view.hide_missing = self.hide_missing;
+        view.show_folders = self.folders;
+    }
+}
+
+/// The search box's stable id, so Esc can find the field.
+pub(super) fn search_id() -> egui::Id {
+    egui::Id::new("file-search")
+}
+
+/// What the search box is looking for: a case-insensitive substring, or - when the text
+/// holds `*` or `?` - a wildcard pattern that must match the whole shown name.
+pub(super) struct Search {
+    needle: String,
+    wildcard: bool,
+}
+
+impl Search {
+    /// `None` when the box is empty (or only spaces), so the list shows everything.
+    pub(super) fn new(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        Some(Self {
+            needle: text.to_lowercase(),
+            wildcard: text.contains(['*', '?']),
+        })
+    }
+
+    pub(super) fn matches(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        if self.wildcard {
+            glob_match(&self.needle, &name)
+        } else {
+            name.contains(&self.needle)
+        }
+    }
+}
+
+/// `*` matches any run of characters (including none) and `?` matches exactly one.
+/// Both sides are already lowercased by [`Search`].
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Where to resume when a `*` has to swallow one more character.
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi + 1, ti));
+            pi += 1;
+        } else if let Some((after, at)) = star {
+            star = Some((after, at + 1));
+            pi = after;
+            ti = at + 1;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// The name a row shows. A `D` entry normally names one child folder, but some working
+/// copies record a full path there; the list shows the folder it points at, not the
+/// whole path, while the recorded text stays untouched for cvs commands.
+pub(super) fn display_name(name: &str, is_dir: bool) -> &str {
+    if is_dir {
+        let last = name.rsplit(['\\', '/']).next().unwrap_or(name);
+        if !last.is_empty() {
+            return last;
+        }
+    }
+    name
+}
+
+impl Filters {
+    pub(super) fn shows(&self, r: &Row) -> bool {
+        match r.state {
+            State::Folder => self.folders,
+            State::Unchanged => self.unchanged,
+            State::Modified => self.changed,
+            State::Added => self.added,
+            State::Removed => self.removed,
+            State::Conflict | State::NeedsPatch => self.conflicts,
+            State::Unknown => self.unknown && !self.hide_unknown,
+            State::Missing => self.missing && !self.hide_missing,
+            // Names the repository has but this working copy has not checked out are
+            // always shown; they are the point of the server listing.
+            State::Remote => !r.is_dir || self.folders,
+        }
+    }
+
+    pub(super) fn enabled(&self, s: State) -> bool {
+        match s {
+            State::Folder => self.folders,
+            State::Unchanged => self.unchanged,
+            State::Modified => self.changed,
+            State::Added => self.added,
+            State::Removed => self.removed,
+            State::Conflict | State::NeedsPatch => self.conflicts,
+            State::Unknown => self.unknown,
+            State::Missing => self.missing,
+            State::Remote => true,
+        }
+    }
+
+    /// Is the state's box ticked at all, whether or not "hide" keeps its rows out of the list?
+    /// Used by the Show menu to say which states the list is filtering on.
+    pub(super) fn filtering(&self) -> Vec<&'static str> {
+        let all = [
+            (State::Unchanged, "up-to-date"),
+            (State::Modified, "modified"),
+            (State::Added, "added"),
+            (State::Removed, "removed"),
+            (State::Conflict, "conflicts"),
+            (State::Unknown, "not in project"),
+            (State::Missing, "missing"),
+        ];
+        all.iter()
+            .filter(|(s, _)| !self.enabled(*s))
+            .map(|(_, n)| *n)
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SortKey {
+    Name,
+    State,
+    Revision,
+    Tag,
+    Date,
+}
+
+impl SortKey {
+    /// The wording the Sort by menu uses. The list's heading for Date says "Recorded";
+    /// the menu spells out that it means the recorded time.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            SortKey::Name => "Name",
+            SortKey::State => "State",
+            SortKey::Revision => "Revision",
+            SortKey::Tag => "Sticky tag",
+            SortKey::Date => "Recorded time",
+        }
+    }
+
+    /// The value stored in the settings file.
+    pub(super) fn token(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::State => "state",
+            SortKey::Revision => "revision",
+            SortKey::Tag => "tag",
+            SortKey::Date => "date",
+        }
+    }
+
+    /// Read a saved value, falling back to the name column for anything unknown.
+    pub(super) fn from_token(token: &str) -> Self {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "state" => SortKey::State,
+            "revision" => SortKey::Revision,
+            "tag" => SortKey::Tag,
+            "date" => SortKey::Date,
+            _ => SortKey::Name,
+        }
+    }
+}
+
+impl App {
+    /// Open the search box at the right of the nav bar and hand it the keyboard.
+    pub(super) fn open_search(&mut self) {
+        self.search_open = true;
+        self.focus_search = true;
+    }
+
+    /// Close the search box and drop its filter, so the whole folder is listed again.
+    pub(super) fn close_search(&mut self, ctx: &egui::Context) {
+        self.search.clear();
+        self.search_open = false;
+        self.focus_search = false;
+        self.order_dirty = true;
+        ctx.memory_mut(|m| m.surrender_focus(search_id()));
+    }
+
+    /// Rebuild the visible order only when something that affects it changed.
+    pub(super) fn ensure_order(&mut self) {
+        if !self.order_dirty {
+            return;
+        }
+        let search = Search::new(&self.search);
+        let mut order: Vec<usize> = (0..self.rows.len())
+            .filter(|i| {
+                let r = &self.rows[*i];
+                self.filters.shows(r)
+                    && search
+                        .as_ref()
+                        .map_or(true, |s| s.matches(display_name(&r.name, r.is_dir)))
+            })
+            .collect();
+        let key = self.sort;
+        let ascending = self.sort_asc;
+        let rows = &self.rows;
+        order.sort_by(|a, b| compare_rows(key, ascending, &rows[*a], &rows[*b]));
+        self.order = order;
+        self.order_dirty = false;
+    }
+
+    pub(super) fn build_state_sheet(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("Working folder : {}\n", self.dir.display()));
+        out.push_str(&format!(
+            "CVSROOT        : {}\n",
+            if self.root.is_empty() {
+                "(none - not a project folder)"
+            } else {
+                &self.root
+            }
+        ));
+        out.push_str(&format!(
+            "Repository     : {}\n",
+            if self.repository.is_empty() {
+                "(unknown)"
+            } else {
+                &self.repository
+            }
+        ));
+        out.push_str(&format!("Checked        : {}\n\n", entries::now_text()));
+        // A folder with 20,000 files must produce the same short sheet as an empty one:
+        // the list already shows each row, so this sheet only counts them.
+        let files = self
+            .rows
+            .iter()
+            .filter(|r| !r.is_dir && r.origin == Origin::Local)
+            .count();
+        out.push_str(&format!("{:<21}: {}\n", "Files", files));
+        for state in [
+            State::Unchanged,
+            State::Modified,
+            State::Added,
+            State::Removed,
+            State::NeedsPatch,
+            State::Conflict,
+            State::Missing,
+            State::Unknown,
+        ] {
+            let count = self
+                .rows
+                .iter()
+                .filter(|r| !r.is_dir && r.origin == Origin::Local && r.state == state)
+                .count();
+            out.push_str(&format!("  {:<20}: {}\n", state.label(), count));
+        }
+        out.push_str("\nEvery file's state is in the list above; this sheet only counts them.\n");
+        out.push_str("\nHow each state is decided:\n");
+        out.push_str("  Up-to-date          file time equals the time recorded in CVS/Entries\n");
+        out.push_str("  Locally Modified    the two times differ\n");
+        out.push_str("  Locally Added       revision recorded as 0 (added, never committed)\n");
+        out.push_str("  Locally Removed     revision recorded as -1\n");
+        out.push_str("  Needs Patch         the recorded date begins with '/' (already patched)\n");
+        out.push_str("  Unresolved Conflict the recorded date says 'Result of merge'\n");
+        out.push_str("  Missing             CVS/Entries names a file that is not on disk\n");
+        out.push_str("  Not in project      a file on disk that CVS/Entries does not name\n");
+        out
+    }
+
+    /// Format the File states sheet now. Loading a folder only marks it stale; this runs
+    /// when the pane is shown or when the user asks for a fresh sheet.
+    pub(super) fn refresh_state_sheet(&mut self) {
+        self.state_sheet = self.build_state_sheet();
+        self.state_dirty = false;
+    }
+
+    pub(super) fn count_states(&self) -> Vec<(State, usize)> {
+        let mut v = Vec::new();
+        for s in [
+            State::Modified,
+            State::Added,
+            State::Removed,
+            State::Conflict,
+            State::Unknown,
+            State::Missing,
+        ] {
+            let n = self.rows.iter().filter(|r| r.state == s).count();
+            if n > 0 {
+                v.push((s, n));
+            }
+        }
+        v
+    }
+
+    pub(super) fn selected_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .selected
+            .iter()
+            .filter_map(|i| self.rows.get(*i))
+            .map(|r| r.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The selected names that exist in the working copy. Commands such as update,
+    /// commit or edit must not be given a name that is only on the server.
+    pub(super) fn selected_local_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .selected
+            .iter()
+            .filter_map(|i| self.rows.get(*i))
+            .filter(|row| row.origin == Origin::Local)
+            .map(|row| row.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// True when something is selected and every selected row is server-only.
+    pub(super) fn selection_is_all_remote(&self) -> bool {
+        !self.selected.is_empty()
+            && self.selected.iter().all(|index| {
+                self.rows
+                    .get(*index)
+                    .is_some_and(|row| row.origin == Origin::Remote)
+            })
+    }
+
+    pub(super) fn flip_sort(&mut self, k: SortKey) {
+        if self.sort == k {
+            self.sort_asc = !self.sort_asc;
+        } else {
+            self.sort = k;
+            self.sort_asc = true;
+        }
+        self.order_dirty = true;
+    }
+
+    /// Copy the list's current filters and sort order into the settings draft. The
+    /// settings file is written once when the window closes, not on every click.
+    pub(super) fn sync_view_prefs(&mut self) {
+        self.filters.write_view(&mut self.prefs.view);
+        self.prefs.view.sort = self.sort.token().to_string();
+        self.prefs.view.sort_ascending = self.sort_asc;
+    }
+}
+
+/// The browser's row order. Folders come first in both directions; the chosen column then
+/// orders the folders among themselves and the files among themselves.
+fn compare_rows(key: SortKey, ascending: bool, a: &Row, b: &Row) -> Ordering {
+    // `false < true`, so comparing b to a puts `is_dir == true` first.
+    let folders = b.is_dir.cmp(&a.is_dir);
+    if folders != Ordering::Equal {
+        return folders;
+    }
+    if key == SortKey::Date {
+        // The recorded text is asctime, whose day column and weekday do not sort by
+        // calendar order. Parse it, and keep rows without a readable date at the end
+        // in both directions.
+        return match (
+            entries::parse_entry_date(&a.timestamp),
+            entries::parse_entry_date(&b.timestamp),
+        ) {
+            (Some(left), Some(right)) => {
+                let c = left.cmp(&right);
+                if ascending {
+                    c
+                } else {
+                    c.reverse()
+                }
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+    }
+    let c = match key {
+        SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortKey::State => a.state.label().cmp(b.state.label()),
+        SortKey::Revision => revision_key(&a.revision).cmp(&revision_key(&b.revision)),
+        SortKey::Tag => a.tag.to_lowercase().cmp(&b.tag.to_lowercase()),
+        SortKey::Date => unreachable!("the date column is handled above"),
+    };
+    if ascending {
+        c
+    } else {
+        c.reverse()
+    }
+}
+
+fn revision_key(rev: &str) -> (u32, u32, String) {
+    let mut it = rev.split('.');
+    let a = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let b = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (a, b, rev.to_string())
+}
+
+#[allow(dead_code)]
+fn is_dir(p: &Path) -> bool {
+    p.is_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{app_with_rows, row};
+    use cvsdesk::prefs::ViewState;
+    use cvsdesk::remote::Listing;
+
+    #[test]
+    fn folders_sort_before_files_in_both_directions() {
+        let folder = row("zebra", true);
+        let file = row("aaa.txt", false);
+        for key in [
+            SortKey::Name,
+            SortKey::State,
+            SortKey::Revision,
+            SortKey::Tag,
+            SortKey::Date,
+        ] {
+            for ascending in [true, false] {
+                assert_eq!(
+                    compare_rows(key, ascending, &folder, &file),
+                    Ordering::Less,
+                    "{key:?} ascending={ascending} must put the folder first"
+                );
+                assert_eq!(
+                    compare_rows(key, ascending, &file, &folder),
+                    Ordering::Greater,
+                    "{key:?} ascending={ascending} must put the folder first"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn files_still_follow_the_chosen_column() {
+        let a = row("aaa.txt", false);
+        let b = row("bbb.txt", false);
+        assert_eq!(compare_rows(SortKey::Name, true, &a, &b), Ordering::Less);
+        assert_eq!(
+            compare_rows(SortKey::Name, false, &a, &b),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn recorded_dates_sort_by_the_calendar_not_by_the_weekday() {
+        // Both rows record a Wednesday, so the raw asctime text compares "Sep 25" with
+        // "Sep 16" and never looks at the year. The date column must parse the time.
+        let mut older = row("older.txt", false);
+        older.timestamp = "Wed Sep 25 08:01:28 2019".into();
+        let mut newer = row("newer.txt", false);
+        newer.timestamp = "Wed Sep 16 01:44:33 2026".into();
+
+        assert_eq!(
+            compare_rows(SortKey::Date, true, &older, &newer),
+            Ordering::Less,
+            "2019 comes before 2026"
+        );
+        assert_eq!(
+            compare_rows(SortKey::Date, false, &older, &newer),
+            Ordering::Greater,
+            "descending puts the newer year first"
+        );
+
+        let without_date = row("no-date.txt", false);
+        assert_eq!(
+            compare_rows(SortKey::Date, true, &older, &without_date),
+            Ordering::Less,
+            "a row with no readable date stays at the bottom"
+        );
+        assert_eq!(
+            compare_rows(SortKey::Date, false, &older, &without_date),
+            Ordering::Less,
+            "a row with no readable date stays at the bottom in both directions"
+        );
+    }
+
+    #[test]
+    fn the_order_cache_is_reused_until_it_is_marked_stale() {
+        let mut app = app_with_rows(vec![row("a.txt", false), row("b.txt", false)]);
+        app.ensure_order();
+        assert_eq!(app.order, vec![0, 1]);
+        app.filters.unknown = false;
+        app.ensure_order();
+        assert_eq!(app.order, vec![0, 1], "a clean cache is reused");
+        app.order_dirty = true;
+        app.ensure_order();
+        assert!(app.order.is_empty(), "the rebuilt order applies the filter");
+    }
+
+    #[test]
+    fn an_empty_search_does_not_filter() {
+        assert!(Search::new("").is_none());
+        assert!(Search::new("   ").is_none());
+    }
+
+    #[test]
+    fn plain_text_matches_anywhere_and_ignores_case() {
+        let search = Search::new("readme").unwrap();
+        assert!(search.matches("README.md"));
+        assert!(search.matches("my-readme.txt"));
+        assert!(!search.matches("read.txt"));
+
+        let chinese = Search::new("报表").unwrap();
+        assert!(chinese.matches("销售报表2026.xlsx"));
+        assert!(!chinese.matches("销售明细.xlsx"));
+    }
+
+    #[test]
+    fn a_star_matches_any_run_and_a_question_mark_one_character() {
+        let cpp = Search::new("*.cpp").unwrap();
+        assert!(cpp.matches("main.cpp"));
+        assert!(
+            !cpp.matches("main.cpp.bak"),
+            "a wildcard pattern matches the whole name"
+        );
+
+        let log = Search::new("log?.txt").unwrap();
+        assert!(log.matches("log1.txt"));
+        assert!(!log.matches("log10.txt"));
+
+        let middle = Search::new("a*b*c").unwrap();
+        assert!(middle.matches("aXXbYYc"));
+        assert!(!middle.matches("aXXbYY"));
+    }
+
+    #[test]
+    fn search_matches_the_folder_name_the_list_shows() {
+        let mut app = app_with_rows(vec![row(r"C:\temp\repo", true)]);
+        app.search = "rep?".into();
+        app.ensure_order();
+        assert_eq!(
+            app.order,
+            vec![0],
+            "the recorded path is not what the user sees or searches"
+        );
+    }
+
+    #[test]
+    fn search_and_the_state_filters_apply_together() {
+        let mut app = app_with_rows(vec![row("Alpha.txt", false), row("alpha.log", false)]);
+        app.rows[0].state = State::Modified;
+        app.search = "alpha".into();
+        app.filters.unknown = false;
+        app.order_dirty = true;
+        app.ensure_order();
+        assert_eq!(app.order, vec![0]);
+    }
+
+    #[test]
+    fn server_rows_are_always_shown_and_add_no_filter_switch() {
+        let mut remote = row("server.txt", false);
+        remote.origin = Origin::Remote;
+        remote.state = State::Remote;
+
+        let filters = Filters::default();
+        assert!(filters.shows(&remote));
+        assert!(filters.enabled(State::Remote));
+        assert!(!filters.filtering().contains(&"on server"));
+
+        let mut remote_folder = row("server-folder", true);
+        remote_folder.origin = Origin::Remote;
+        remote_folder.state = State::Remote;
+        let mut no_folders = Filters::default();
+        no_folders.folders = false;
+        assert!(!no_folders.shows(&remote_folder));
+        assert!(no_folders.shows(&remote));
+    }
+
+    #[test]
+    fn search_finds_a_server_only_name() {
+        let mut app = app_with_rows(vec![row("local.txt", false)]);
+        app.apply_remote_listing(Listing {
+            files: vec!["remote.txt".to_string()],
+            dirs: vec!["RemoteFolder".to_string()],
+        });
+        app.search = "remote.txt".into();
+        app.order_dirty = true;
+        app.ensure_order();
+
+        assert_eq!(app.order.len(), 1);
+        assert_eq!(app.rows[app.order[0]].name, "remote.txt");
+        assert_eq!(app.rows[app.order[0]].state, State::Remote);
+    }
+
+    #[test]
+    fn a_folder_recorded_with_a_full_path_shows_only_its_last_part() {
+        assert_eq!(
+            display_name(r"C:\temp\cvsdesk-baseline-1", true),
+            "cvsdesk-baseline-1"
+        );
+        assert_eq!(display_name(r"sub\child", true), "child");
+        assert_eq!(display_name("plain", true), "plain");
+        assert_eq!(display_name(r"C:\temp\file", false), r"C:\temp\file");
+    }
+
+    #[test]
+    fn the_state_sheet_summarizes_each_state_and_leaves_the_rows_to_the_list() {
+        let mut modified = row("changed.txt", false);
+        modified.state = State::Modified;
+        let mut unchanged = row("same.txt", false);
+        unchanged.state = State::Unchanged;
+        let mut loose = row("loose.txt", false);
+        loose.state = State::Unknown;
+        let app = app_with_rows(vec![modified, unchanged, loose, row("sub", true)]);
+        let sheet = app.build_state_sheet();
+
+        for name in ["changed.txt", "same.txt", "loose.txt", "sub"] {
+            assert!(
+                !sheet.contains(name),
+                "the file list already shows the rows; the sheet must not repeat {name:?}"
+            );
+        }
+        let files = sheet
+            .lines()
+            .find(|line| line.starts_with("Files"))
+            .expect("the sheet gives a file total");
+        assert!(files.ends_with(": 3"), "folders are not files: {files}");
+        for (label, count) in [
+            ("Up-to-date", 1),
+            ("Locally Modified", 1),
+            ("Locally Added", 0),
+            ("Locally Removed", 0),
+            ("Needs Patch", 0),
+            ("Unresolved Conflict", 0),
+            ("Missing", 0),
+            ("Not in project", 1),
+        ] {
+            let line = sheet
+                .lines()
+                .find(|line| {
+                    line.trim_start().starts_with(label) && line.ends_with(&format!(": {count}"))
+                })
+                .unwrap_or_else(|| panic!("the sheet has no {label:?} count: {sheet}"));
+            assert!(
+                line.contains(':'),
+                "the count line, not the legend line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_state_sheet_stays_short_however_many_files_there_are() {
+        let rows: Vec<Row> = (0..20_000)
+            .map(|i| row(&format!("file-{i}.txt"), false))
+            .collect();
+        let app = app_with_rows(rows);
+        let sheet = app.build_state_sheet();
+        assert!(
+            sheet.lines().count() < 40,
+            "the sheet grew to {} lines with the folder; it must not list the files",
+            sheet.lines().count()
+        );
+    }
+
+    #[test]
+    fn every_sort_key_round_trips_through_its_saved_token() {
+        for key in [
+            SortKey::Name,
+            SortKey::State,
+            SortKey::Revision,
+            SortKey::Tag,
+            SortKey::Date,
+        ] {
+            assert_eq!(SortKey::from_token(key.token()), key);
+        }
+    }
+
+    #[test]
+    fn an_unknown_saved_sort_falls_back_to_name() {
+        assert_eq!(SortKey::from_token("bogus"), SortKey::Name);
+    }
+
+    #[test]
+    fn filters_read_and_write_every_view_switch() {
+        let view = ViewState {
+            show_unchanged: false,
+            show_modified: false,
+            show_added: false,
+            show_removed: false,
+            show_conflicts: false,
+            show_unknown: false,
+            hide_unknown: true,
+            show_missing: false,
+            hide_missing: true,
+            show_folders: false,
+            ..ViewState::default()
+        };
+
+        let filters = Filters::from_view(&view);
+        assert!(!filters.unchanged);
+        assert!(!filters.changed);
+        assert!(!filters.added);
+        assert!(!filters.removed);
+        assert!(!filters.conflicts);
+        assert!(!filters.unknown);
+        assert!(filters.hide_unknown);
+        assert!(!filters.missing);
+        assert!(filters.hide_missing);
+        assert!(!filters.folders);
+
+        let mut back = ViewState::default();
+        filters.write_view(&mut back);
+        assert_eq!(back, view);
+    }
+}
