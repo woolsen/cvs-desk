@@ -49,7 +49,7 @@ pub struct FileMeta {
 /// One complete side of the comparison.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileText {
-    /// "main.c @ 1.4" or "main.c (working copy)".
+    /// The text drawn above the side, e.g. "main.c @ 1.4" or "local".
     pub title: String,
     /// The complete text, normalized to `\n` line endings.
     pub text: String,

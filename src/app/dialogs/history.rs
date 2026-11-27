@@ -211,7 +211,7 @@ impl HistoryState {
                 "c",
             ),
             FileText::from_text(
-                "main.c @ 1.5",
+                "@ 1.5",
                 "/* sample */\n#include <stdio.h>\n\nint main(void) { return 1; }\n",
                 "c",
             ),
@@ -1182,7 +1182,6 @@ fn details(ui: &mut egui::Ui, state: &mut HistoryState) {
 
 fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Diff").strong());
         let previous_on = state.diff_target == Target::Previous;
         if ui.selectable_label(previous_on, "This revision").clicked() {
             state.set_target(Target::Previous);
@@ -1528,7 +1527,7 @@ mod tests {
         }
         for expected in [
             "main.c @ 1.4",
-            "main.c @ 1.5",
+            "@ 1.5",
             "int main(void) { return 0; }",
             "int main(void) { return 1; }",
         ] {

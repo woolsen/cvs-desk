@@ -115,11 +115,11 @@ fn load_pair(
     // One session for both sides: its `Drop` removes both checkouts, whether the
     // second read succeeds or fails.
     let session = Session::new().map_err(|error| format!("temporary folder: {error}"))?;
-    let left_text = load_side(dir, root, globals, file, left, &session, "left", cancel)?;
-    let right_text = load_side(dir, root, globals, file, right, &session, "right", cancel)?;
+    let left_bytes = load_side(dir, root, globals, file, left, &session, "left", cancel)?;
+    let right_bytes = load_side(dir, root, globals, file, right, &session, "right", cancel)?;
     Ok(LoadedPair {
-        left: left_text,
-        right: right_text,
+        left: file_text(title_for(file, left, true), file, left_bytes),
+        right: file_text(title_for(file, right, false), file, right_bytes),
     })
 }
 
@@ -132,21 +132,27 @@ fn load_side(
     session: &Session,
     child: &str,
     cancel: &CancelToken,
-) -> Result<FileText, String> {
-    let (bytes, title) = match side {
+) -> Result<Vec<u8>, String> {
+    match side {
         Side::WorkingCopy => {
             let path = dir.join(file);
-            let bytes = std::fs::read(&path)
-                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-            (bytes, format!("{file} (working copy)"))
+            std::fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))
         }
         Side::Revision(revision) => {
-            let bytes =
-                checkout_revision(dir, root, globals, file, revision, session, child, cancel)?;
-            (bytes, format!("{file} @ {revision}"))
+            checkout_revision(dir, root, globals, file, revision, session, child, cancel)
         }
-    };
-    Ok(file_text(title, file, bytes))
+    }
+}
+
+/// The title drawn above a side. The file name appears once, on the first side;
+/// the second side only names the version it shows.
+fn title_for(file: &str, side: &Side, first: bool) -> String {
+    match side {
+        Side::WorkingCopy if first => format!("{file} (working copy)"),
+        Side::WorkingCopy => "local".to_string(),
+        Side::Revision(revision) if first => format!("{file} @ {revision}"),
+        Side::Revision(revision) => format!("@ {revision}"),
+    }
 }
 
 /// The checkout command's arguments. Kept apart so the exact shape can be tested
@@ -448,6 +454,20 @@ mod tests {
         assert!(module_path(&dir, "/etc/passwd").is_err());
         assert!(module_path(&dir, "a//b.c").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_second_side_only_names_its_version_or_the_local_file() {
+        let file = "main.c";
+        assert_eq!(
+            title_for(file, &Side::Revision("1.3".into()), true),
+            "main.c @ 1.3"
+        );
+        assert_eq!(
+            title_for(file, &Side::Revision("1.4".into()), false),
+            "@ 1.4"
+        );
+        assert_eq!(title_for(file, &Side::WorkingCopy, false), "local");
     }
 
     #[test]
