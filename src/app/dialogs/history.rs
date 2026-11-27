@@ -68,9 +68,9 @@ pub(crate) struct HistoryState {
     branch_filter: BranchFilter,
     diff_target: Target,
     diff_open: bool,
-    /// Bring the floating diff window forward once, when it opens. It must not stay
-    /// in front: the user clicks revisions in the history window beside it.
-    diff_focus: bool,
+    /// Raise each native window once when it opens, then leave the z-order to the user.
+    raised: bool,
+    diff_raise: bool,
     diff_model: Option<DiffModel>,
     diff_view: DiffView,
     diff_generation: u64,
@@ -172,7 +172,8 @@ impl HistoryState {
             branch_filter: BranchFilter::All,
             diff_target: Target::Previous,
             diff_open: false,
-            diff_focus: false,
+            raised: false,
+            diff_raise: false,
             diff_model: None,
             diff_view: DiffView::new(),
             diff_generation: 0,
@@ -346,7 +347,7 @@ impl HistoryState {
         }
         self.diff_open = open;
         if open {
-            self.diff_focus = true;
+            self.diff_raise = true;
             if !self.demo {
                 self.loader = None;
                 self.diff_model = None;
@@ -511,29 +512,28 @@ impl HistoryState {
     }
 }
 
-/// Draw the window. `dir`, `root`, the global flags and the diff flags are the pieces
+/// Draw the windows. `dir`, `root`, the global flags and the diff flags are the pieces
 /// the preview worker needs; the dialog itself only owns the revision state.
+///
+/// Both windows are real OS windows, so they can leave the main window and sit on
+/// another monitor. The close button arrives as a viewport event; the state is still
+/// owned by `App`, which is why this borrows it instead of moving it into a callback.
 pub(super) fn show(
     ctx: &egui::Context,
     state: &mut HistoryState,
     globals: &[String],
+    raise: bool,
 ) -> Option<DialogAction> {
     state.tick(ctx, globals);
 
-    let mut open = true;
     let mut action = None;
-    egui::Window::new(format!("File History — {}", state.file))
-        .id(egui::Id::unique("file_history"))
-        .open(&mut open)
-        .drag_area(egui::WindowDrag::Anywhere)
-        .collapsible(false)
-        .resizable(true)
-        .default_width(920.0)
-        .default_height(650.0)
-        .min_width(700.0)
-        .min_height(420.0)
-        .show(ctx, |ui| {
-            toolbar(ui, state, &mut action);
+    let mut open = true;
+
+    ctx.show_viewport_immediate(
+        history_viewport_id(),
+        history_viewport(state, raise),
+        |ui, _class| {
+            egui::Panel::top("file_history_toolbar").show(ui, |ui| toolbar(ui, state, &mut action));
 
             let visible = state.visible_indices();
             state.ensure_visible(&visible);
@@ -549,49 +549,80 @@ pub(super) fn show(
                 .show(ui, |ui| details(ui, state));
             egui::CentralPanel::default()
                 .show(ui, |ui| list(ui, state, &visible, ui.available_height()));
-        });
+
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                open = false;
+            }
+        },
+    );
+
+    // A fresh native window can be created behind the parent. Ask for the front once;
+    // after that the user owns the z-order.
+    if raise && !state.raised {
+        state.raised = true;
+        ctx.send_viewport_cmd_to(history_viewport_id(), egui::ViewportCommand::Focus);
+    }
 
     if state.diff_open {
-        diff_window(ctx, state);
+        diff_window(ctx, state, raise);
     }
 
     if !open {
+        // One more pass drops the viewports that are no longer shown.
+        ctx.request_repaint();
         action = Some(DialogAction::Close);
     }
     action
 }
 
-fn diff_window_id() -> egui::Id {
-    egui::Id::unique("file_history_diff_window")
+fn history_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("file_history")
 }
 
-/// The floating diff window. It sits beside the history window rather than in it, so
-/// the user can keep clicking revisions and watch the diff follow the selection.
-fn diff_window(ctx: &egui::Context, state: &mut HistoryState) {
-    // The first frame is foreground so a newly opened diff is never hidden behind
-    // the history window. Afterwards it returns to the normal layer, where clicking
-    // the history window can bring that window forward again.
-    let order = if state.diff_focus {
-        egui::Order::Foreground
-    } else {
-        egui::Order::Middle
-    };
+fn history_viewport(state: &HistoryState, active: bool) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(format!("File History — {}", state.file))
+        .with_inner_size([920.0, 650.0])
+        .with_min_inner_size([700.0, 420.0])
+        .with_active(active)
+}
+
+fn diff_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("file_history_diff")
+}
+
+fn diff_viewport(state: &HistoryState, active: bool) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(format!("Diff — {}", state.file))
+        .with_inner_size([1100.0, 650.0])
+        .with_min_inner_size([640.0, 320.0])
+        .with_active(active)
+}
+
+/// The diff is its own OS window beside the history window, so the user can keep
+/// clicking revisions and watch the diff follow the selection, even on another monitor.
+fn diff_window(ctx: &egui::Context, state: &mut HistoryState, raise: bool) {
     let mut open = true;
-    egui::Window::new(format!("Diff — {}", state.file))
-        .id(diff_window_id())
-        .open(&mut open)
-        .order(order)
-        .collapsible(false)
-        .resizable(true)
-        .default_width(1100.0)
-        .default_height(650.0)
-        .min_width(640.0)
-        .min_height(320.0)
-        .show(ctx, |ui| diff(ui, state));
-    state.diff_focus = false;
+    ctx.show_viewport_immediate(
+        diff_viewport_id(),
+        diff_viewport(state, raise),
+        |ui, _class| {
+            egui::CentralPanel::default().show(ui, |ui| diff(ui, state));
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                open = false;
+            }
+        },
+    );
+
+    if raise && state.diff_raise {
+        state.diff_raise = false;
+        ctx.send_viewport_cmd_to(diff_viewport_id(), egui::ViewportCommand::Focus);
+    }
 
     if !open {
         state.set_diff_open(false);
+        // The window disappears on the pass that stops asking for it.
+        ctx.request_repaint();
     }
 }
 
@@ -1350,6 +1381,57 @@ mod tests {
         state.set_diff_open(false);
 
         assert!(!state.diff_open);
+        assert!(state.pending.is_none(), "the debounce is dropped");
+        assert!(!state.diff_loading, "the spinner stops");
+    }
+
+    /// The OS close button arrives as a viewport event, not as the old egui window's
+    /// `open` flag. `show` must translate it into `DialogAction::Close`.
+    fn close_requested_input(size: egui::Vec2) -> egui::RawInput {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("every raw input carries the root viewport")
+            .events
+            .push(egui::ViewportEvent::Close);
+        input
+    }
+
+    #[test]
+    fn closing_the_history_window_closes_the_dialog() {
+        let mut state = sample();
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let input = close_requested_input(egui::vec2(920.0, 650.0));
+
+        let mut action = None;
+        crate::app::ui::test_run(&ctx, input, |ui| {
+            action = show(ui.ctx(), &mut state, &[], false);
+        });
+
+        assert!(
+            matches!(action, Some(DialogAction::Close)),
+            "the dialog must close when its window does"
+        );
+    }
+
+    #[test]
+    fn closing_the_diff_window_stops_its_preview() {
+        let mut state = sample();
+        state.set_diff_open(true);
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let input = close_requested_input(egui::vec2(1100.0, 650.0));
+
+        crate::app::ui::test_run(&ctx, input, |ui| {
+            let _ = show(ui.ctx(), &mut state, &[], false);
+        });
+
+        assert!(!state.diff_open, "the diff must close when its window does");
         assert!(state.pending.is_none(), "the debounce is dropped");
         assert!(!state.diff_loading, "the spinner stops");
     }

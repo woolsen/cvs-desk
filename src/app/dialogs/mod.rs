@@ -84,6 +84,9 @@ impl App {
         let kind_label = self.folder_kind().unwrap_or("").to_string();
         let dir = self.dir.display().to_string();
         let history_globals = self.prefs.globals();
+        // A check photographs the main window without taking focus, so dialogs opened by
+        // one must not raise themselves over whatever the user is doing.
+        let raise_windows = self.shot.is_none();
         let busy = self.runner.running;
         let has_cvs = self.has_cvs;
         let action = {
@@ -134,7 +137,9 @@ impl App {
                 ),
                 Dialog::Preferences { tab, draft } => preferences::show(ctx, tab, draft),
                 Dialog::CommandLine { text } => command_line::show(ctx, text, &cvsroot),
-                Dialog::History(state) => history::show(ctx, state, &history_globals),
+                Dialog::History(state) => {
+                    history::show(ctx, state, &history_globals, raise_windows)
+                }
                 Dialog::About => about::show(ctx, &cvsroot, &kind_label, &repository, &dir),
             }
         };
