@@ -31,15 +31,14 @@ fn window_icon() -> Option<egui::IconData> {
 /// refresh of input latency: the hover band and a window drag trail the cursor. One
 /// frame in flight is the low-latency choice for a GUI like this one.
 ///
-/// The adapters offered are OpenGL and Vulkan, chosen by [`prefer_opengl`]: on an Intel
-/// integrated GPU the DX12 backend alone keeps about 60 MB more committed than both of
-/// them together, before it is even asked to draw anything. `WGPU_BACKEND` still
-/// overrides the list, so a machine that has to draw through DX12 can say
-/// `WGPU_BACKEND=dx12`.
+/// The window draws through OpenGL, chosen by [`prefer_opengl`]: on an Intel integrated
+/// GPU that is 73 MB of private memory against 355 MB through DX12, for the same pixels.
+/// `WGPU_BACKEND` still overrides the list, so a machine with no usable OpenGL can draw
+/// through Vulkan or DX12.
 fn native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
-    setup.instance_descriptor.backends = eframe::wgpu::Backends::from_env()
-        .unwrap_or(eframe::wgpu::Backends::GL | eframe::wgpu::Backends::VULKAN);
+    setup.instance_descriptor.backends =
+        eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::GL);
     setup.native_adapter_selector = Some(std::sync::Arc::new(prefer_opengl));
 
     eframe::NativeOptions {
@@ -63,9 +62,8 @@ fn native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
 /// with the DX12 backend, 147 MB when DX12 was merely offered as an option, and 73 MB
 /// with OpenGL alone. Nothing here uses a DX12 feature, so the cheaper adapter wins.
 ///
-/// It is only a preference. Every backend that was asked for stays in the list, so a
-/// machine whose OpenGL is too old - or which offers none at all - still opens its window
-/// on Vulkan.
+/// The other backends are only a preference too: a machine told to draw through another
+/// one - `WGPU_BACKEND=vulkan` or `WGPU_BACKEND=dx12` - still opens its window here.
 fn prefer_opengl(
     adapters: &[eframe::wgpu::Adapter],
     surface: Option<&eframe::wgpu::Surface<'_>>,

@@ -25,17 +25,19 @@ includes `SHA256SUMS.txt` for checking the download.
 
 ## Graphics
 
-The window draws through OpenGL, and takes Vulkan where a machine has no usable OpenGL. That
-keeps the program small: on an Intel integrated GPU the same window needs about 89 MB of
-private memory this way, against 355 MB when it is drawn through DX12.
+The window draws through OpenGL. That keeps the program small: on an Intel integrated GPU
+the same window needs about 73 MB of private memory this way, against 355 MB when it is
+drawn through DX12.
 
-Some remote desktop sessions and virtual machines offer neither OpenGL nor Vulkan. On those,
-name the backend before starting the program:
+A remote desktop session or a virtual machine may offer no usable OpenGL, and then the
+window cannot open. Name another backend before starting the program:
 
 ```text
-set WGPU_BACKEND=dx12
+set WGPU_BACKEND=vulkan
 cvsdesk.exe
 ```
+
+`WGPU_BACKEND=dx12` does the same on a machine whose Vulkan driver is missing.
 
 ## Features
 
