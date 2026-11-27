@@ -109,6 +109,12 @@ jobs:
       contents: write
 
     steps:
+      # `gh release create --generate-notes` runs git to find the previous tag,
+      # so the publish job needs a checkout as well as the built assets.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v8
         with:
           name: release-assets
