@@ -73,7 +73,6 @@ pub(super) enum DialogAction {
     RunLine,
     ShowSheet,
     HistoryRefresh,
-    HistoryRawLog,
 }
 
 impl App {
@@ -188,16 +187,6 @@ impl App {
                 }
                 return;
             }
-            DialogAction::HistoryRawLog => {
-                if let Some(Dialog::History(state)) = self.dialog.as_ref() {
-                    let raw = state.raw().to_vec();
-                    self.captured = raw.clone();
-                    self.pane_output.insert(OutputKind::Log, raw);
-                }
-                self.output = OutputKind::Log;
-                self.dialog = None;
-                return;
-            }
             _ => {}
         }
         let Some(d) = self.dialog.take() else {
@@ -216,8 +205,7 @@ impl App {
             | DialogAction::TagsCreate
             | DialogAction::TagsDelete
             | DialogAction::TagsRetry
-            | DialogAction::HistoryRefresh
-            | DialogAction::HistoryRawLog => {}
+            | DialogAction::HistoryRefresh => {}
         }
     }
 }

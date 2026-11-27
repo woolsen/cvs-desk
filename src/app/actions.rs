@@ -410,12 +410,7 @@ impl App {
                 } else if wait.refresh {
                     if let Some(Dialog::History(state)) = self.dialog.as_mut() {
                         if state.file() == wait.file {
-                            state.replace_history(
-                                history,
-                                wait.working,
-                                wait.working_state,
-                                self.captured.clone(),
-                            );
+                            state.replace_history(history, wait.working, wait.working_state);
                         }
                     }
                 } else {
@@ -426,7 +421,6 @@ impl App {
                         wait.working,
                         wait.working_state,
                         history,
-                        self.captured.clone(),
                     ))));
                 }
             }

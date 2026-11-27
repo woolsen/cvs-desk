@@ -887,7 +887,7 @@ impl App {
                                 pick(ui, "Commit…", FileMenuAction::Commit);
                                 pick(ui, "Diff", FileMenuAction::Diff);
                                 if !r.is_dir {
-                                    pick(ui, "File History…", FileMenuAction::History);
+                                    pick(ui, "History", FileMenuAction::History);
                                 }
                                 pick(ui, "Tags…", FileMenuAction::Tags);
                                 pick(ui, "Status", FileMenuAction::Status);
@@ -1793,7 +1793,7 @@ mod tests {
             "Update",
             "Commit…",
             "Diff",
-            "File History…",
+            "History",
             "Status",
             "Copy name",
             "Copy full path",

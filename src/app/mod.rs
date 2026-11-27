@@ -346,7 +346,6 @@ impl App {
                 "main.c".into(),
                 "1.5".into(),
                 history,
-                log,
             ))));
             app.status = "File History of a saved cvs log reply".into();
         }

@@ -57,7 +57,6 @@ pub(crate) struct HistoryState {
     working: String,
     working_state: State,
     history: History,
-    raw: Vec<String>,
     selected: Option<usize>,
     filter: String,
     /// The lowercased text each revision is searched by, built once per log refresh.
@@ -150,7 +149,6 @@ impl HistoryState {
         working: String,
         working_state: State,
         history: History,
-        raw: Vec<String>,
     ) -> Self {
         let selected = history.working_index(&working);
         let haystacks = search_texts(&history);
@@ -161,7 +159,6 @@ impl HistoryState {
             working,
             working_state,
             history,
-            raw,
             selected,
             filter: String::new(),
             haystacks,
@@ -191,9 +188,8 @@ impl HistoryState {
         file: String,
         working: String,
         history: History,
-        raw: Vec<String>,
     ) -> Self {
-        let mut state = Self::new(dir, root, file, working, State::Unchanged, history, raw);
+        let mut state = Self::new(dir, root, file, working, State::Unchanged, history);
         state.demo = true;
         state.pending = None;
         state.loader = None;
@@ -238,10 +234,6 @@ impl HistoryState {
         self.history.revisions.len()
     }
 
-    pub(crate) fn raw(&self) -> &[String] {
-        &self.raw
-    }
-
     pub(crate) fn set_loading(&mut self, loading: bool) {
         self.loading = loading;
         if loading {
@@ -263,7 +255,6 @@ impl HistoryState {
         history: History,
         working: String,
         working_state: State,
-        raw: Vec<String>,
     ) {
         let previous_revision = self
             .selected
@@ -280,7 +271,6 @@ impl HistoryState {
         self.haystacks = search_texts(&self.history);
         self.working = working;
         self.working_state = working_state;
-        self.raw = raw;
         self.loading = false;
         self.error.clear();
         self.tags_expanded = false;
@@ -649,12 +639,6 @@ fn toolbar(ui: &mut egui::Ui, state: &mut HistoryState, action: &mut Option<Dial
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("More", |ui| {
-                if ui.button("Raw log").clicked() {
-                    *action = Some(DialogAction::HistoryRawLog);
-                    ui.close();
-                }
-            });
             ui.label(
                 egui::RichText::new(state.history.summary())
                     .small()
@@ -1312,8 +1296,52 @@ mod tests {
             "1.4".into(),
             State::Unchanged,
             history,
-            log,
         )
+    }
+
+    fn toolbar_texts(state: &mut HistoryState) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut action = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(920.0, 120.0),
+                )),
+                ..Default::default()
+            },
+            |ui| toolbar(ui, state, &mut action),
+        );
+        output.textures_delta.clear();
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_string()),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        texts
+    }
+
+    #[test]
+    fn the_history_toolbar_offers_no_raw_log() {
+        let mut state = sample();
+        let texts = toolbar_texts(&mut state);
+
+        assert!(
+            !texts.iter().any(|text| text == "More" || text == "Raw log"),
+            "the toolbar must not offer a raw log: {texts:?}"
+        );
     }
 
     #[test]
