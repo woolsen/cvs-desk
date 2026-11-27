@@ -85,6 +85,8 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         checkout_waiting: None,
         pending: Vec::new(),
         captured: Vec::new(),
+        pane_output: Default::default(),
+        running_kind: None,
         history_waiting: None,
         tag_waiting: None,
         output: OutputKind::Console,

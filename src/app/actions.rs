@@ -53,6 +53,7 @@ impl App {
         let started = self.runner.start(&dir, args, password, line, move |m| {
             let _ = tx.send(m);
         });
+        self.running_kind = started.then_some(kind);
         self.refresh_after_command = started && refresh;
         started
     }
@@ -200,6 +201,8 @@ impl App {
         if !self.start_in(dir.clone(), req, OutputKind::Log) {
             return;
         }
+        // The reply belongs to the File History window, not to a pane.
+        self.running_kind = None;
         self.output = previous;
         if refresh {
             if let Some(Dialog::History(state)) = self.dialog.as_mut() {
@@ -299,6 +302,7 @@ impl App {
         let previous = self.output;
         self.start(req, OutputKind::Log);
         // Reading tags is a background detail; leave the pane the user was reading on screen.
+        self.running_kind = None;
         self.output = previous;
         if let Some(Dialog::Tags(state)) = self.dialog.as_mut() {
             state.loading = true;
@@ -342,7 +346,17 @@ impl App {
             }
         }
         if finished {
-            self.captured = std::mem::take(&mut self.pending);
+            let kind = self.running_kind.take();
+            let output = std::mem::take(&mut self.pending);
+            // A history or tag read runs for another window, not for the pane: its reply
+            // must not replace what the reader was looking at.
+            let background = self.history_waiting.is_some() || self.tag_waiting.is_some();
+            self.captured = output.clone();
+            if !background {
+                if let Some(kind) = kind {
+                    self.pane_output.insert(kind, output);
+                }
+            }
             self.rx = None;
             // A checkout that worked has created a folder worth showing. Anything else
             // that just ended leaves the window where it is.

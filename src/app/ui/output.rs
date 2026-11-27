@@ -239,9 +239,11 @@ impl App {
                 }
             }
             _ => {
-                if self.runner.running {
-                    self.runner.lines.join("\n")
-                } else if self.captured.is_empty() {
+                if self.runner.running && self.running_kind == Some(self.output) {
+                    self.pending.join("\n")
+                } else if let Some(lines) = self.pane_output.get(&self.output) {
+                    lines.join("\n")
+                } else {
                     match self.output {
                         OutputKind::Editors => {
                             "Nothing listed yet. Choose Query > Editors or Query > Watchers to ask\ncvs who is editing or watching the selected files.".to_string()
@@ -251,8 +253,6 @@ impl App {
                             self.output.title()
                         ),
                     }
-                } else {
-                    self.captured.join("\n")
                 }
             }
         }
@@ -574,11 +574,69 @@ mod tests {
     }
 
     #[test]
+    fn another_panes_reply_does_not_fill_this_pane() {
+        let mut app = app_with_rows(Vec::new());
+        app.pane_output.insert(
+            crate::app::OutputKind::Status,
+            vec!["the status reply".into()],
+        );
+        app.output = crate::app::OutputKind::Status;
+        assert_eq!(app.output_text(), "the status reply");
+
+        app.output = crate::app::OutputKind::Log;
+        assert!(
+            app.output_text().starts_with("No output yet"),
+            "the Log pane showed the Status reply: {:?}",
+            app.output_text()
+        );
+    }
+
+    #[test]
+    fn a_finished_command_fills_only_its_pane() {
+        let mut app = app_with_rows(Vec::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.rx = Some(rx);
+        app.running_kind = Some(crate::app::OutputKind::Status);
+        app.pending = vec!["the status reply".into()];
+        tx.send(cvsdesk::cvs::Msg::Done(0)).unwrap();
+        app.poll();
+
+        app.output = crate::app::OutputKind::Status;
+        assert_eq!(app.output_text(), "the status reply");
+        app.output = crate::app::OutputKind::Log;
+        assert!(
+            app.output_text().starts_with("No output yet"),
+            "the Log pane showed the Status reply: {:?}",
+            app.output_text()
+        );
+    }
+
+    #[test]
+    fn a_background_reply_leaves_the_pane_alone() {
+        let mut app = app_with_rows(Vec::new());
+        app.pane_output
+            .insert(crate::app::OutputKind::Log, vec!["the old log".into()]);
+        app.output = crate::app::OutputKind::Log;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.rx = Some(rx);
+        app.tag_waiting = Some(crate::app::TagWait::Query);
+        app.pending = vec!["the tag list".into()];
+        tx.send(cvsdesk::cvs::Msg::Done(0)).unwrap();
+        app.poll();
+
+        assert_eq!(app.output_text(), "the old log");
+        assert_eq!(app.captured, vec!["the tag list"]);
+    }
+
+    #[test]
     fn the_clear_row_belongs_to_the_console_only() {
         let ctx = egui::Context::default();
         let mut app = app_with_rows(Vec::new());
         app.output = crate::app::OutputKind::Log;
-        app.captured = vec!["first line".into(), "second line".into()];
+        app.pane_output.insert(
+            crate::app::OutputKind::Log,
+            vec!["first line".into(), "second line".into()],
+        );
 
         let settled = open_menu(&ctx, &mut app, "first line\nsecond line");
 

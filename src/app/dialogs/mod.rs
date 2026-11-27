@@ -190,7 +190,9 @@ impl App {
             }
             DialogAction::HistoryRawLog => {
                 if let Some(Dialog::History(state)) = self.dialog.as_ref() {
-                    self.captured = state.raw().to_vec();
+                    let raw = state.raw().to_vec();
+                    self.captured = raw.clone();
+                    self.pane_output.insert(OutputKind::Log, raw);
                 }
                 self.output = OutputKind::Log;
                 self.dialog = None;

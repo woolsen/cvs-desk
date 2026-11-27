@@ -1,7 +1,7 @@
 //! The window's state and lifetime: the folder it shows, the command it runs and the
 //! worker threads that feed both.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::Instant;
@@ -31,7 +31,7 @@ mod ui;
 mod tests;
 
 /// Which pane at the bottom shows what.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum OutputKind {
     Console,
     State,
@@ -205,6 +205,12 @@ pub(crate) struct App {
     checkout_waiting: Option<PathBuf>,
     pending: Vec<String>,
     captured: Vec<String>,
+    /// The last finished reply of each pane that keeps one. Switching tabs shows what
+    /// that pane last reported instead of the newest command's reply.
+    pane_output: HashMap<OutputKind, Vec<String>>,
+    /// The pane the running command reports into. While it runs, only that pane follows
+    /// its output.
+    running_kind: Option<OutputKind>,
     /// The file whose `cvs log` was asked for the File History window. When the command
     /// finishes, the captured log is parsed and the window opens or refreshes.
     history_waiting: Option<HistoryWait>,
@@ -307,6 +313,8 @@ impl App {
             checkout_waiting: None,
             pending: Vec::new(),
             captured: Vec::new(),
+            pane_output: HashMap::new(),
+            running_kind: None,
             history_waiting: None,
             tag_waiting: None,
             output: OutputKind::Console,
