@@ -695,6 +695,27 @@ fn a_query_command_leaves_the_rows_and_selection_alone() {
 }
 
 #[test]
+fn a_worker_that_dies_without_done_ends_the_command() {
+    let mut app = app_with_rows(Vec::new());
+    app.runner.running = true;
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    drop(tx);
+
+    app.poll();
+
+    assert!(
+        !app.runner.running,
+        "the window kept saying cvs is running after its worker stopped"
+    );
+    assert!(app
+        .runner
+        .lines
+        .iter()
+        .any(|line| line.contains("stopped without reporting")));
+}
+
+#[test]
 fn the_file_history_entry_needs_one_file() {
     let mut app = app_with_rows(vec![
         row("a.txt", false),

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, TryRecvError};
 
 use cvsdesk::cvs::{Cmd, CommandRequest, Msg};
 use cvsdesk::cvs_client::work::codec;
@@ -53,6 +53,10 @@ impl App {
         let started = self.runner.start(&dir, args, password, line, move |m| {
             let _ = tx.send(m);
         });
+        if !started {
+            // No worker was spawned, so there will never be a message on this channel.
+            self.rx = None;
+        }
         self.running_kind = started.then_some(kind);
         self.refresh_after_command = started && refresh;
         started
@@ -314,10 +318,27 @@ impl App {
         self.poll_load();
         self.poll_remote();
         let mut msgs = Vec::new();
+        let mut vanished = false;
         if let Some(rx) = &self.rx {
-            while let Ok(m) = rx.try_recv() {
-                msgs.push(m);
+            loop {
+                match rx.try_recv() {
+                    Ok(m) => msgs.push(m),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        vanished = true;
+                        break;
+                    }
+                }
             }
+        }
+        // A worker that died without a `Done` must not leave the window saying "cvs
+        // running" forever. Report it as a failed command and let the usual finish path
+        // clear every window that was waiting on it.
+        if vanished && !msgs.iter().any(|m| matches!(m, Msg::Done(_))) {
+            msgs.push(Msg::Line(
+                "The cvs worker stopped without reporting a result.".into(),
+            ));
+            msgs.push(Msg::Done(1));
         }
         let mut finished = false;
         let mut exit_code: Option<i32> = None;
