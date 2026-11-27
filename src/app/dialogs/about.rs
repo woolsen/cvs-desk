@@ -38,7 +38,7 @@ pub(super) fn show(
             if !repository.is_empty() {
                 wrap::label(ui, &format!("Repository: {}", repository));
             }
-            wrap::label(ui, &format!("Working folder: {}", dir));
+            wrap::label(ui, &format!("Folder: {}", dir));
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("File states").clicked() {

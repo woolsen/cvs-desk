@@ -598,7 +598,7 @@ impl App {
             ui.label(egui::RichText::new("Scope").small().weak());
             let (local, remote) = self.scope_counts();
             for (scope, label, count) in [
-                (ViewScope::WorkingCopy, "Working copy", local),
+                (ViewScope::WorkingCopy, "Local", local),
                 (ViewScope::NotCheckedOut, "Not checked out", remote),
                 (ViewScope::All, "All names", local + remote),
             ] {
@@ -707,7 +707,7 @@ impl App {
             if ui
                 .selectable_label(
                     self.filters.scope == ViewScope::WorkingCopy,
-                    "Working copy",
+                    "Local",
                 )
                 .on_hover_text(
                     "Rows that belong to this local checkout, including missing and untracked files.",
@@ -722,7 +722,7 @@ impl App {
                     remote_label,
                 )
                 .on_hover_text(
-                    "Repository names that are not in this working copy. Read with rlog -R for this folder only.",
+                    "Repository names that are not in this folder. Read with rlog -R for this folder only.",
                 )
                 .clicked()
             {
@@ -730,7 +730,7 @@ impl App {
             }
             if ui
                 .selectable_label(self.filters.scope == ViewScope::All, "All names")
-                .on_hover_text("Working-copy rows together with repository-only names.")
+                .on_hover_text("Local rows together with repository-only names.")
                 .clicked()
             {
                 chosen = Some(ViewScope::All);
@@ -2006,7 +2006,7 @@ mod tests {
         let closed = run_list(&ctx, &mut app, Vec::new());
         assert!(!app.filters_open, "the filter row starts folded");
         assert!(
-            text_pos(&closed, "Working copy").is_none(),
+            text_pos(&closed, "Local").is_none(),
             "a folded filter row must not take a line above the list"
         );
 
@@ -2025,7 +2025,7 @@ mod tests {
 
         assert!(app.filters_open, "the click must unfold the filter row");
         assert!(
-            text_pos(&opened, "Working copy").is_some(),
+            text_pos(&opened, "Local").is_some(),
             "the unfolded row shows the scope choices"
         );
     }

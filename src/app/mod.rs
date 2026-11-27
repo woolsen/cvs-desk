@@ -336,7 +336,7 @@ impl App {
         app.runner.lines.push("CVS Desk ready.".into());
         app.runner
             .lines
-            .push(format!("Working folder: {}", app.dir.display()));
+            .push(format!("Folder: {}", app.dir.display()));
         if show_history {
             let log: Vec<String> = demo::SAMPLE_LOG.lines().map(|l| l.to_string()).collect();
             let history = cvsdesk::history::History::parse("main.c", &log);

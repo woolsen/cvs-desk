@@ -541,7 +541,7 @@ impl App {
             self.go_to(dir);
             self.runner
                 .lines
-                .push(format!("Working folder: {}", self.dir.display()));
+                .push(format!("Folder: {}", self.dir.display()));
         }
     }
 

@@ -235,7 +235,7 @@ fn loading_a_folder_leaves_the_state_sheet_until_it_is_shown() {
     assert!(app.state_dirty);
     app.refresh_state_sheet();
     assert!(!app.state_dirty);
-    assert!(app.state_sheet.contains("Working folder"));
+    assert!(app.state_sheet.contains("Folder"));
     assert!(
         !app.state_sheet.contains("a.txt"),
         "the sheet sums the states up; the list shows the files"

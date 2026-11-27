@@ -1160,7 +1160,7 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
             state.set_target(Target::Previous);
         }
         let working_on = state.diff_target == Target::Working;
-        if ui.selectable_label(working_on, "Working copy").clicked() {
+        if ui.selectable_label(working_on, "Local file").clicked() {
             state.set_target(Target::Working);
         }
         if state.diff_loading {
@@ -1178,7 +1178,7 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
                         .previous_revision(index)
                         .map(|previous| format!("{} → {}", previous, node.revision))
                         .unwrap_or_else(|| format!("initial → {}", node.revision)),
-                    Target::Working => format!("{} → working copy", node.revision),
+                    Target::Working => format!("{} → local file", node.revision),
                 };
                 ui.label(egui::RichText::new(range).small().color(MUTED));
                 if state.diff_target == Target::Previous {
@@ -1251,7 +1251,7 @@ fn status(ui: &mut egui::Ui, state: &HistoryState) {
         };
         ui.label(
             egui::RichText::new(format!(
-                "Working copy: {} · {}",
+                "Local file: {} · {}",
                 revision,
                 state.working_state.label()
             ))

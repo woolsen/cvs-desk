@@ -24,7 +24,7 @@ pub(super) enum FilterPreset {
 impl FilterPreset {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::WorkingCopy => "Working copy",
+            Self::WorkingCopy => "Local",
             Self::MyChanges => "My changes",
             Self::NeedsAttention => "Needs attention",
             Self::NotCheckedOut => "Not checked out",
@@ -243,7 +243,7 @@ impl Filters {
             hidden.push("sub-folders");
         }
         if self.scope == ViewScope::NotCheckedOut {
-            hidden.push("working copy (scope)");
+            hidden.push("local (scope)");
         }
         hidden
     }
@@ -404,7 +404,7 @@ impl App {
 
     pub(super) fn build_state_sheet(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("Working folder : {}\n", self.dir.display()));
+        out.push_str(&format!("Folder         : {}\n", self.dir.display()));
         out.push_str(&format!(
             "CVSROOT        : {}\n",
             if self.root.is_empty() {
