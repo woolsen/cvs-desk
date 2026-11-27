@@ -515,10 +515,11 @@ pub fn run(
 
     // `start_server` comes before `do_editor` in the reference, so a root that cannot be
     // reached fails before the user spends time in the editor.
+    let editor = session.root.options.editor.clone();
     let message = match &opts.message {
         Some(text) => text.clone(),
         None if session.no_execute() => String::new(),
-        None => match edit_message(cwd, session.root.options.editor.as_deref())? {
+        None => match edit_message(cwd, editor.as_deref(), &mut session)? {
             (text, warning) => {
                 if let Some(warning) = warning {
                     session.err(warning);
@@ -731,6 +732,7 @@ fn editor_command(option: Option<&str>) -> String {
 fn edit_message(
     cwd: &Path,
     editor_option: Option<&str>,
+    session: &mut protocol::Session,
 ) -> Result<(Option<String>, Option<String>)> {
     let template = std::fs::read(cwd.join("CVS").join("Template"))
         .ok()
@@ -772,7 +774,7 @@ fn edit_message(
             let _ = std::fs::remove_file(&path);
             return Ok((message, warning));
         }
-        match ask_action() {
+        match ask_action(session) {
             EditAction::Abort => {
                 let _ = std::fs::remove_file(&path);
                 return Err(Error::aborted("import", "aborted by user"));
@@ -793,6 +795,7 @@ fn edit_message(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum EditAction {
     Abort,
     Aborting,
@@ -801,20 +804,24 @@ enum EditAction {
     Reuse,
 }
 
-fn ask_action() -> EditAction {
-    use std::io::Write;
-    print!(
+/// The question the reference asks when the editor left the message unchanged. It goes
+/// through the sink so a window does not wait on a standard input nobody can type into.
+fn ask_action(session: &mut protocol::Session) -> EditAction {
+    let answer = session.ask(
         "\nLog message unchanged or not specified\n\
          a)bort, c)ontinue, e)dit, !)reuse this message unchanged for remaining dirs\n\
          Action: (continue) "
+            .to_string(),
     );
-    let _ = std::io::stdout().flush();
-    let mut answer = String::new();
-    // `getline` returning -1 (EOF or a read error) is fatal in the reference
-    // (logmsg.c:343-351).
-    if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
-        return EditAction::Aborting;
+    match answer {
+        // `getline` returning -1 (EOF or a read error) is fatal in the reference
+        // (logmsg.c:343-351). A window's sink has no line to give, so it gives up too.
+        None => EditAction::Aborting,
+        Some(answer) => action_for(&answer),
     }
+}
+
+fn action_for(answer: &str) -> EditAction {
     match answer.trim_start().chars().next() {
         Some('a' | 'A') => EditAction::Abort,
         Some('e' | 'E') => EditAction::Edit,
@@ -1299,6 +1306,15 @@ mod tests {
             "the parent's temporary wrappers do not reach the child"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_unchanged_message_answers_are_read_like_the_reference() {
+        assert_eq!(action_for("a"), EditAction::Abort);
+        assert_eq!(action_for("E"), EditAction::Edit);
+        assert_eq!(action_for("!"), EditAction::Reuse);
+        assert_eq!(action_for(""), EditAction::Continue);
+        assert_eq!(action_for("whatever"), EditAction::Continue);
     }
 
     #[test]

@@ -352,6 +352,7 @@ pub fn run(
         opts.message.clone(),
         editor.as_deref(),
         no_execute,
+        &mut session,
     )?;
     if let Some(warning) = editor_warning {
         session.err(warning);
@@ -552,6 +553,7 @@ fn resolve_message(
     message: Option<String>,
     editor: Option<&str>,
     no_execute: bool,
+    session: &mut protocol::Session,
 ) -> Result<(Option<String>, Option<String>)> {
     if message.is_some() {
         return Ok((message, None));
@@ -559,7 +561,7 @@ fn resolve_message(
     if no_execute {
         return Ok((None, None));
     }
-    edit_message(cwd, plan, editor)
+    edit_message(cwd, plan, editor, session)
 }
 
 /// Tell the server about files it does not know. A server without the `Questionable`
@@ -684,6 +686,7 @@ fn edit_message(
     cwd: &Path,
     plan: &ChangePlan,
     editor_option: Option<&str>,
+    session: &mut protocol::Session,
 ) -> Result<(Option<String>, Option<String>)> {
     let template = std::fs::read(cwd.join("CVS").join("Template"))
         .ok()
@@ -733,7 +736,7 @@ fn edit_message(
             let _ = std::fs::remove_file(&path);
             return Ok((message, warning));
         }
-        match ask_action() {
+        match ask_action(session) {
             EditAction::Abort => {
                 let _ = std::fs::remove_file(&path);
                 return Err(Error::aborted("commit", "aborted by user"));
@@ -747,6 +750,7 @@ fn edit_message(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum EditAction {
     Abort,
     Continue,
@@ -754,18 +758,24 @@ enum EditAction {
     Reuse,
 }
 
-fn ask_action() -> EditAction {
-    use std::io::Write;
-    print!(
+/// The question the reference asks when the editor left the message unchanged. It goes
+/// through the sink: the console reads the answer, and a window answers with its default
+/// at once instead of waiting on a standard input nobody can type into.
+fn ask_action(session: &mut protocol::Session) -> EditAction {
+    let answer = session.ask(
         "\nLog message unchanged or not specified\n\
          a)bort, c)ontinue, e)dit, !)reuse this message unchanged for remaining dirs\n\
          Action: (continue) "
+            .to_string(),
     );
-    let _ = std::io::stdout().flush();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
-        return EditAction::Continue;
+    match answer {
+        // End of input counts as the default, as the reference's `getline` failure does.
+        None => EditAction::Continue,
+        Some(answer) => action_for(&answer),
     }
+}
+
+fn action_for(answer: &str) -> EditAction {
     match answer.trim_start().chars().next() {
         Some('a' | 'A') => EditAction::Abort,
         Some('e' | 'E') => EditAction::Edit,
@@ -971,6 +981,16 @@ mod tests {
 #[cfg(test)]
 mod editor_tests {
     use super::*;
+
+    #[test]
+    fn the_unchanged_message_answers_are_read_like_the_reference() {
+        assert_eq!(action_for("a"), EditAction::Abort);
+        assert_eq!(action_for("E"), EditAction::Edit);
+        assert_eq!(action_for("!"), EditAction::Reuse);
+        assert_eq!(action_for("  ! reuse"), EditAction::Reuse);
+        assert_eq!(action_for(""), EditAction::Continue);
+        assert_eq!(action_for("whatever"), EditAction::Continue);
+    }
 
     #[test]
     fn the_editor_text_keeps_the_template_above_the_instructions() {

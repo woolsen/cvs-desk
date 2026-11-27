@@ -139,12 +139,18 @@ fn decode_description(encoding: codec::Codec, bytes: &[u8]) -> String {
 
 /// A description with `-t-` is the text after the dash; `-tfile` reads the file in the working
 /// copy's encoding; a bare `-t` reads standard input.
-fn description(cwd: &Path, rest: &str) -> Result<String> {
+fn description(cwd: &Path, rest: &str, interactive: bool) -> Result<String> {
     if let Some(text) = rest.strip_prefix('-') {
         return Ok(text.to_string());
     }
     let encoding = codec::for_dir(cwd);
     let bytes = if rest.is_empty() {
+        if !interactive {
+            return Err(Error::plain(
+                "admin",
+                "cannot read the description from standard input in this window; use -t- or -tfile",
+            ));
+        }
         let mut bytes = Vec::new();
         std::io::stdin().read_to_end(&mut bytes).map_err(|e| {
             Error::plain(
@@ -169,7 +175,7 @@ fn description(cwd: &Path, rest: &str) -> Result<String> {
     Ok(decode_description(encoding, &bytes))
 }
 
-fn parse_args(cwd: &Path, args: &[String]) -> Result<Options> {
+fn parse_args(cwd: &Path, args: &[String], interactive: bool) -> Result<Options> {
     let expanded = expand_clusters(args)?;
     let args = expanded.as_slice();
     let mut opts = Options::default();
@@ -238,7 +244,7 @@ fn parse_args(cwd: &Path, args: &[String]) -> Result<Options> {
                 if opts.description.is_some() {
                     return Err(usage_error("cvs admin: duplicate 't' option"));
                 }
-                opts.description = Some(description(cwd, rest)?);
+                opts.description = Some(description(cwd, rest, interactive)?);
             }
             'a' | 'A' | 'e' | 'l' | 'u' | 'n' | 'N' | 'm' | 's' => {
                 // `-e`, `-l` and `-u` take their value only when it is attached.
@@ -339,7 +345,7 @@ pub fn run(
         usage(sink);
         return Ok(1);
     }
-    let opts = parse_args(cwd, args)?;
+    let opts = parse_args(cwd, args, sink.interactive())?;
     for warning in &opts.warnings {
         sink.err(format!("cvs admin: {}", warning));
     }
@@ -412,23 +418,23 @@ mod tests {
 
     #[test]
     fn clusters_split_like_getopt() {
-        let opts = parse_args(Path::new("."), &args(&["-qL", "f"])).unwrap();
+        let opts = parse_args(Path::new("."), &args(&["-qL", "f"]), true).unwrap();
         assert!(opts.quiet);
         assert!(opts.strict);
         assert_eq!(opts.names, vec!["f".to_string()]);
 
-        let opts = parse_args(Path::new("."), &args(&["-Lu1.2", "f"])).unwrap();
+        let opts = parse_args(Path::new("."), &args(&["-Lu1.2", "f"]), true).unwrap();
         assert!(opts.strict);
         assert_eq!(opts.extra, vec!["-u1.2".to_string()]);
 
         // An optional argument swallows the rest of its cluster, so this is `-l q`.
-        let opts = parse_args(Path::new("."), &args(&["-lq", "f"])).unwrap();
+        let opts = parse_args(Path::new("."), &args(&["-lq", "f"]), true).unwrap();
         assert_eq!(opts.extra, vec!["-lq".to_string()]);
     }
 
     #[test]
     fn a_glued_version_does_not_swallow_the_next_option() {
-        let opts = parse_args(Path::new("."), &args(&["-V1.1", "-kb", "f"])).unwrap();
+        let opts = parse_args(Path::new("."), &args(&["-V1.1", "-kb", "f"]), true).unwrap();
         assert_eq!(opts.warnings, ["the `-V' option is obsolete"]);
         assert_eq!(opts.kflag.as_deref(), Some("b"));
         assert_eq!(opts.names, vec!["f".to_string()]);
@@ -436,7 +442,7 @@ mod tests {
 
     #[test]
     fn a_bare_version_needs_its_argument() {
-        let error = parse_args(Path::new("."), &args(&["-V"])).unwrap_err();
+        let error = parse_args(Path::new("."), &args(&["-V"]), true).unwrap_err();
         assert!(
             error.text().contains("option requires an argument -- 'V'"),
             "{}",
@@ -446,7 +452,7 @@ mod tests {
 
     #[test]
     fn the_first_name_ends_the_option_list() {
-        let opts = parse_args(Path::new("."), &args(&["f", "-kb", "-Z"])).unwrap();
+        let opts = parse_args(Path::new("."), &args(&["f", "-kb", "-Z"]), true).unwrap();
         assert!(opts.kflag.is_none());
         assert_eq!(
             opts.names,
@@ -456,14 +462,14 @@ mod tests {
 
     #[test]
     fn a_double_dash_makes_everything_after_it_a_name() {
-        let opts = parse_args(Path::new("."), &args(&["-q", "--", "-kb"])).unwrap();
+        let opts = parse_args(Path::new("."), &args(&["-q", "--", "-kb"]), true).unwrap();
         assert!(opts.quiet);
         assert_eq!(opts.names, vec!["-kb".to_string()]);
     }
 
     #[test]
     fn unsupported_rcs_options_get_their_own_diagnosis() {
-        let error = parse_args(Path::new("."), &args(&["-i", "f"])).unwrap_err();
+        let error = parse_args(Path::new("."), &args(&["-i", "f"]), true).unwrap_err();
         assert!(
             error
                 .text()
@@ -473,7 +479,7 @@ mod tests {
         );
         assert!(error.text().contains("run add or import"), "{}", error);
 
-        let error = parse_args(Path::new("."), &args(&["-x", "f"])).unwrap_err();
+        let error = parse_args(Path::new("."), &args(&["-x", "f"]), true).unwrap_err();
         assert!(
             error
                 .text()
@@ -485,15 +491,21 @@ mod tests {
 
     #[test]
     fn only_the_reference_keyword_modes_are_accepted() {
-        let opts = parse_args(Path::new("."), &args(&["-kkv", "f"])).unwrap();
+        let opts = parse_args(Path::new("."), &args(&["-kkv", "f"]), true).unwrap();
         assert_eq!(opts.kflag.as_deref(), Some("kv"));
 
-        let error = parse_args(Path::new("."), &args(&["-k", "u", "f"])).unwrap_err();
+        let error = parse_args(Path::new("."), &args(&["-k", "u", "f"]), true).unwrap_err();
         assert!(
             error.text().contains("invalid RCS keyword expansion mode"),
             "{}",
             error
         );
+    }
+
+    #[test]
+    fn a_bare_description_is_refused_without_a_terminal() {
+        let error = parse_args(Path::new("."), &args(&["-t", "f"]), false).unwrap_err();
+        assert!(error.text().contains("standard input"), "{}", error);
     }
 
     #[test]

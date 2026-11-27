@@ -317,6 +317,12 @@ impl<'a> Session<'a> {
         self.sink.confirm(text)
     }
 
+    /// Ask one line through the same sink. A window's sink answers `None` at once; a console
+    /// sink reads the keyboard. Either way the command never reads the process's stdin.
+    pub fn ask(&mut self, text: String) -> Option<String> {
+        self.sink.ask(text)
+    }
+
     pub fn send(&mut self, line: &str) -> Result<()> {
         let bytes = self
             .wire_codec

@@ -58,21 +58,27 @@ pub trait Sink {
     fn prompt(&mut self, text: String) {
         self.out(text);
     }
-    /// Ask a question whose answer is one line. A sink with no terminal returns an empty
-    /// answer, which every caller reads as "no".
-    fn ask(&mut self, text: String) -> String {
+    /// Ask a question whose answer is one line. `None` means there was no line to read — a
+    /// closed input or a sink with no terminal — and every caller treats that as giving up.
+    fn ask(&mut self, text: String) -> Option<String> {
         self.prompt(text);
-        String::new()
+        None
     }
     /// Ask a yes/no question. Only an answer starting with `y` or `Y` is yes.
     fn confirm(&mut self, text: String) -> bool {
-        matches!(self.ask(text).trim_start().chars().next(), Some('y' | 'Y'))
+        self.ask(text)
+            .is_some_and(|answer| matches!(answer.trim_start().chars().next(), Some('y' | 'Y')))
     }
     /// Ask for a password. `None` means this caller cannot ask; the command then fails
     /// with a clear message rather than reading the process's stdin.
     fn secret(&mut self, text: String) -> Option<String> {
         self.prompt(text);
         None
+    }
+    /// Whether this sink can read from a person at all. A window has no terminal, so a
+    /// command that would read standard input must fail there instead of waiting forever.
+    fn interactive(&self) -> bool {
+        false
     }
 }
 
@@ -244,7 +250,9 @@ fn run_command(
                 Some(password) => (password.clone(), true),
                 None => match &req.password {
                     Some(password) => (password.clone(), false),
-                    None => match passfile::read_password("CVS password: ") {
+                    // Through the sink: the window has no terminal to type a password
+                    // into, and asking the process's stdin there would wait forever.
+                    None => match sink.secret("CVS password: ".to_string()) {
                         Some(password) => (password, false),
                         None => {
                             return Err(Error::aborted("login", "login: Failed to read password."))
@@ -920,6 +928,38 @@ mod tests {
 
         std::env::remove_var("CVS_PASSFILE");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_login_without_a_password_asks_the_sink_not_the_stdin() {
+        let mut sink = RecordingSink::default();
+        let error = run(
+            Request {
+                cwd: std::env::temp_dir(),
+                args: vec![
+                    "-d".to_string(),
+                    ":pserver:ann@127.0.0.1:1/repo".to_string(),
+                    "login".to_string(),
+                ],
+                password: None,
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error.text().contains("Failed to read password"),
+            "{}",
+            error
+        );
+        assert!(
+            sink.lines
+                .iter()
+                .any(|(_, line)| line.contains("CVS password")),
+            "the sink was not asked for the password: {:?}",
+            sink.lines
+        );
     }
 
     #[test]

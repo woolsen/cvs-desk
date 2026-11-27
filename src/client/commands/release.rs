@@ -351,7 +351,7 @@ impl Sink for CountingSink<'_> {
         self.inner.prompt(text);
     }
 
-    fn ask(&mut self, text: String) -> String {
+    fn ask(&mut self, text: String) -> Option<String> {
         self.inner.ask(text)
     }
 

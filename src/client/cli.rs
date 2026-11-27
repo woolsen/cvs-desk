@@ -278,15 +278,24 @@ impl Sink for StdoutSink {
         let _ = io::stdout().flush();
     }
 
-    fn ask(&mut self, text: String) -> String {
+    fn ask(&mut self, text: String) -> Option<String> {
         self.prompt(text);
         let mut line = String::new();
-        let _ = io::stdin().read_line(&mut line);
-        line.trim_end_matches(['\r', '\n']).to_string()
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => None,
+            Ok(_) => Some(line.trim_end_matches(['\r', '\n']).to_string()),
+            Err(_) => None,
+        }
     }
 
     fn secret(&mut self, text: String) -> Option<String> {
-        Some(self.ask(text))
+        // An empty answer, including a closed input, is still a password to try: the
+        // reference lets the server refuse it instead of skipping the connection.
+        Some(self.ask(text).unwrap_or_default())
+    }
+
+    fn interactive(&self) -> bool {
+        true
     }
 }
 
