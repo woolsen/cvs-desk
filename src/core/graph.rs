@@ -27,7 +27,7 @@ pub struct RevNode {
     pub lines: Option<(u32, u32)>,
     /// The child branch revisions named by the `branches:` line.
     pub branches: Vec<String>,
-    /// Symbolic names pointing at this revision; filled by [`crate::history`].
+    /// Symbolic names pointing at this revision, newest first; filled by [`crate::history`].
     pub tags: Vec<String>,
     pub branch: bool,
 }

@@ -41,6 +41,8 @@ impl History {
                 }
             }
         }
+        // The log lists tags newest first, and filtering keeps that order, so the first
+        // name a revision carries is the tag created most recently.
         for node in &mut history.revisions {
             node.tags = history
                 .tags

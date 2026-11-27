@@ -4,6 +4,10 @@
 //! whose rows are `\tname: revision`. A tag that points at a `...0.N` revision is a branch
 //! tag; so is the file's own vendor branch, named by the `branch:` header. The window shows
 //! one row per tag for the files in scope, so the same name seen in several files is merged.
+//!
+//! The rows keep the log's order. That order carries the only hint of age a tag has: CVS
+//! writes a new tag at the top of the RCS symbol table, so the log lists tags newest first.
+//! There is no tag time anywhere in the reply, so this order is all a window can go on.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagInfo {
@@ -28,6 +32,9 @@ impl TagInfo {
 }
 
 /// Read the `symbolic names:` blocks of a `cvs log` reply, merging repeated names.
+///
+/// The rows come back in the order the log prints them, newest tag first. A name that
+/// another file lists again keeps the place it was first seen at.
 pub fn parse_log(lines: &[String]) -> Vec<TagInfo> {
     struct Seen {
         branch: bool,
@@ -35,7 +42,10 @@ pub fn parse_log(lines: &[String]) -> Vec<TagInfo> {
         varies: bool,
     }
 
-    let mut seen: std::collections::BTreeMap<String, Seen> = std::collections::BTreeMap::new();
+    // A `Vec` keeps the log's order; the map only finds a name already collected, so a
+    // tag seen in several files is merged where it first appeared instead of moved.
+    let mut ordered: Vec<(String, Seen)> = Vec::new();
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut in_symbolic = false;
     let mut file_branch = String::new();
     for raw in lines {
@@ -74,27 +84,26 @@ pub fn parse_log(lines: &[String]) -> Vec<TagInfo> {
         }
         let branch =
             revision.contains(".0.") || (!file_branch.is_empty() && revision == file_branch);
-        match seen.get_mut(name) {
-            Some(entry) => {
-                entry.branch |= branch;
-                if entry.revision != revision {
-                    entry.varies = true;
-                }
+        if let Some(&index) = at.get(name) {
+            let entry = &mut ordered[index].1;
+            entry.branch |= branch;
+            if entry.revision != revision {
+                entry.varies = true;
             }
-            None => {
-                seen.insert(
-                    name.to_string(),
-                    Seen {
-                        branch,
-                        revision: revision.to_string(),
-                        varies: false,
-                    },
-                );
-            }
+        } else {
+            at.insert(name.to_string(), ordered.len());
+            ordered.push((
+                name.to_string(),
+                Seen {
+                    branch,
+                    revision: revision.to_string(),
+                    varies: false,
+                },
+            ));
         }
     }
 
-    let mut out: Vec<TagInfo> = seen
+    ordered
         .into_iter()
         .map(|(name, entry)| TagInfo {
             name,
@@ -105,14 +114,7 @@ pub fn parse_log(lines: &[String]) -> Vec<TagInfo> {
                 Some(entry.revision)
             },
         })
-        .collect();
-    out.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    out
+        .collect()
 }
 
 /// Why `name` cannot be handed to `cvs tag`, or `None` when it can. The rules are cvs's:
@@ -170,15 +172,39 @@ mod tests {
         assert_eq!(
             parse_log(&log),
             vec![
-                tag("Feature_X", true, Some("1.3.0.2")),
                 tag("Release_1_0", false, Some("1.2")),
+                tag("Feature_X", true, Some("1.3.0.2")),
                 tag("vendor_acme", true, Some("1.1.1")),
             ]
         );
     }
 
     #[test]
-    fn a_tag_seen_in_several_files_keeps_a_revision_only_when_all_agree() {
+    fn the_log_order_is_kept_so_the_newest_tag_comes_first() {
+        // CVS writes a new symbol at the top of the RCS table: `some_random_tag` was
+        // created before `ANOTHER-TAG`, and the log lists ANOTHER-TAG first.
+        let log = lines(
+            "RCS file: foo.jpg,v\n\
+             head: 1.1\n\
+             branch:\n\
+             symbolic names:\n\
+             \tANOTHER-TAG: 1.1\n\
+             \tsome_random_tag: 1.1\n\
+             keyword substitution: b\n",
+        );
+
+        assert_eq!(
+            parse_log(&log),
+            vec![
+                tag("ANOTHER-TAG", false, Some("1.1")),
+                tag("some_random_tag", false, Some("1.1")),
+            ],
+            "sorting by name would hide which tag is the newer one"
+        );
+    }
+
+    #[test]
+    fn a_tag_seen_in_several_files_keeps_the_place_it_was_first_seen_at() {
         let log = lines(
             "RCS file: a.txt,v\n\
              branch:\n\
@@ -190,6 +216,7 @@ mod tests {
              RCS file: b.txt,v\n\
              branch:\n\
              symbolic names:\n\
+             \tZ_NEWER: 1.2\n\
              \tT_COMMON: 1.2\n\
              keyword substitution: kv\n",
         );
@@ -199,6 +226,7 @@ mod tests {
             vec![
                 tag("T_COMMON", false, None),
                 tag("T_ONLY_A", false, Some("1.1")),
+                tag("Z_NEWER", false, Some("1.2")),
             ]
         );
     }
@@ -251,9 +279,9 @@ mod tests {
                 .map(|tag| (tag.name.as_str(), tag.branch))
                 .collect::<Vec<_>>(),
             vec![
-                ("feature_x", true),
                 ("release_1_4", false),
                 ("vendor_acme", true),
+                ("feature_x", true),
             ]
         );
     }

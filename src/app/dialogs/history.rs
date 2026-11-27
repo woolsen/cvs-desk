@@ -90,10 +90,10 @@ pub(crate) struct HistoryState {
 
 /// The one tag shown for a revision, and how many more it has.
 ///
-/// The tags are sorted by name and `cvs log` records no tag time, so the last name is
-/// the newest-looking one.
+/// `cvs log` writes a new tag at the top of its symbol table, so the names arrive newest
+/// first and the first one is the tag created most recently.
 fn shown_tag(tags: &[String]) -> Option<(&str, usize)> {
-    tags.last().map(|tag| (tag.as_str(), tags.len() - 1))
+    tags.first().map(|tag| (tag.as_str(), tags.len() - 1))
 }
 
 /// The lowercased text of every revision, built once when a log is loaded.
@@ -1619,10 +1619,13 @@ mod tests {
 
     #[test]
     fn only_the_newest_tag_and_a_count_are_shown() {
+        // `cvs log` lists tags newest first, so the first name is the newest one. Sorting
+        // by name would pick `Z_oldest` here, which is the tag created first.
         let tags: Vec<String> = [
-            "BSC_GK602526_1_CHENSHAOYU",
-            "BSC_PD_20260820_1",
             "BSC_PD_20261126_1",
+            "BSC_PD_20260820_1",
+            "BSC_GK602526_1_CHENSHAOYU",
+            "Z_oldest",
         ]
         .iter()
         .map(|tag| tag.to_string())
@@ -1630,13 +1633,11 @@ mod tests {
 
         assert_eq!(
             shown_tag(&tags),
-            Some(("BSC_PD_20261126_1", 2)),
-            "the last name is the newest-looking tag"
+            Some(("BSC_PD_20261126_1", 3)),
+            "the first name is the newest tag"
         );
-        assert_eq!(
-            shown_tag(&tags[..1]),
-            Some(("BSC_GK602526_1_CHENSHAOYU", 0))
-        );
+        assert_eq!(shown_tag(&tags[1..]), Some(("BSC_PD_20260820_1", 2)));
+        assert_eq!(shown_tag(&tags[3..]), Some(("Z_oldest", 0)));
         assert_eq!(shown_tag(&[]), None);
     }
 
