@@ -42,6 +42,15 @@ enum OutputKind {
     Editors,
 }
 
+/// How much of the repository's own folder listing the window knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemoteState {
+    Off,
+    Loading,
+    Ready,
+    Failed,
+}
+
 impl OutputKind {
     fn title(self) -> &'static str {
         match self {
@@ -119,6 +128,9 @@ pub(crate) struct App {
     has_cvs: bool,
     root: String,
     repository: String,
+    /// `CVS/Entries.Static` is present: this folder was checked out without all of its
+    /// repository files. It is context, not an error.
+    partial_checkout: bool,
     selected: HashSet<usize>,
     /// The row a Shift-click extends from: the last row picked by a plain or Ctrl
     /// click. Cleared when the selection is cleared or the folder is read again.
@@ -150,6 +162,7 @@ pub(crate) struct App {
     loading: Option<PathBuf>,
     /// The repository-name listing running beside the folder read.
     remote: Option<remote::Loader>,
+    remote_state: RemoteState,
     /// Tests keep the network out; the window turns this on.
     remote_enabled: bool,
     remote_seq: u64,
@@ -232,6 +245,7 @@ impl App {
             has_cvs: false,
             root: String::new(),
             repository: String::new(),
+            partial_checkout: false,
             selected: HashSet::new(),
             anchor: None,
             filters,
@@ -249,6 +263,7 @@ impl App {
             load_rx: None,
             loading: None,
             remote: None,
+            remote_state: RemoteState::Off,
             remote_enabled: true,
             remote_seq: 0,
             remote_lines: Vec::new(),
@@ -336,6 +351,7 @@ impl App {
         // rows when the read finishes.
         self.root.clear();
         self.repository.clear();
+        self.partial_checkout = false;
         self.selected.clear();
         self.anchor = None;
         self.order.clear();
@@ -442,6 +458,7 @@ impl App {
         self.has_cvs = loaded.has_cvs;
         self.root = loaded.root;
         self.repository = loaded.repository;
+        self.partial_checkout = loaded.partial_checkout;
         self.order_dirty = true;
         self.state_dirty = true;
         self.counts = self.count_states();

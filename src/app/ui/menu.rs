@@ -100,6 +100,14 @@ impl App {
                         self.open_search();
                         ui.close();
                     }
+                    if ui
+                        .button("Select all shown")
+                        .on_hover_text("Select every row the current view shows (Ctrl+A).")
+                        .clicked()
+                    {
+                        self.select_all_shown();
+                        ui.close();
+                    }
                     ui.separator();
                     ui.menu_button("Show", |ui| {
                         let f = &mut self.filters;
@@ -109,11 +117,11 @@ impl App {
                         changed |= ui.checkbox(&mut f.added, "Locally added").changed();
                         changed |= ui.checkbox(&mut f.removed, "Locally removed").changed();
                         changed |= ui.checkbox(&mut f.conflicts, "Conflicts").changed();
-                        changed |= ui.checkbox(&mut f.unknown, "Not in project").changed();
+                        changed |= ui.checkbox(&mut f.unknown, "Untracked").changed();
                         changed |= ui
-                            .checkbox(&mut f.hide_unknown, "Hide files not in project")
+                            .checkbox(&mut f.hide_unknown, "Hide untracked files")
                             .changed();
-                        changed |= ui.checkbox(&mut f.missing, "Missing").changed();
+                        changed |= ui.checkbox(&mut f.missing, "Missing locally").changed();
                         changed |= ui
                             .checkbox(&mut f.hide_missing, "Hide missing files")
                             .changed();

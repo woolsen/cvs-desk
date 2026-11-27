@@ -6,11 +6,31 @@ use super::state_color;
 
 impl App {
     pub(super) fn ui_status_bar(&mut self, ui: &mut egui::Ui) {
+        // The status bar is drawn before the central panel, so it must make the view
+        // order current itself; otherwise the first frame after a read shows the old
+        // count.
+        self.ensure_order();
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.loading.is_some() {
                     ui.label(egui::RichText::new("Reading folder…").weak());
                 } else {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Showing {} of {}",
+                            self.order.len(),
+                            self.rows.len()
+                        ))
+                        .weak(),
+                    );
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(self.remote_status_label())
+                            .small()
+                            .weak(),
+                    )
+                    .on_hover_text("Repository names are read with rlog -R for this folder only.");
+                    ui.separator();
                     let counts = &self.counts;
                     if counts.is_empty() {
                         ui.label(egui::RichText::new("No local changes").weak());
@@ -31,7 +51,7 @@ impl App {
                             .small()
                             .weak(),
                     )
-                    .on_hover_text("Unticked in View > Show, so these rows are not listed.");
+                    .on_hover_text("Hidden by the current view, the Show menu or the scope bar.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(t) = &self.trouble {

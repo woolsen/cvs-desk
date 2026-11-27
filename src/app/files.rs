@@ -4,12 +4,13 @@ use std::cmp::Ordering;
 use std::path::Path;
 
 use cvsdesk::entries::{self, Origin, Row, State};
-use cvsdesk::prefs::ViewState;
+use cvsdesk::prefs::{ViewScope, ViewState};
 
-use crate::app::App;
+use crate::app::{App, RemoteState};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct Filters {
+    pub(super) scope: ViewScope,
     pub(super) unchanged: bool,
     pub(super) changed: bool,
     pub(super) added: bool,
@@ -25,6 +26,7 @@ pub(super) struct Filters {
 impl Default for Filters {
     fn default() -> Self {
         Self {
+            scope: ViewScope::WorkingCopy,
             unchanged: true,
             changed: true,
             added: true,
@@ -43,6 +45,7 @@ impl Filters {
     /// The switches the user chose last time, as saved in the settings file.
     pub(super) fn from_view(view: &ViewState) -> Self {
         Self {
+            scope: view.scope,
             unchanged: view.show_unchanged,
             changed: view.show_modified,
             added: view.show_added,
@@ -58,6 +61,7 @@ impl Filters {
 
     /// Copy the switches into the settings draft without touching its sort fields.
     pub(super) fn write_view(&self, view: &mut ViewState) {
+        view.scope = self.scope;
         view.show_unchanged = self.unchanged;
         view.show_modified = self.changed;
         view.show_added = self.added;
@@ -150,6 +154,14 @@ pub(super) fn display_name(name: &str, is_dir: bool) -> &str {
 
 impl Filters {
     pub(super) fn shows(&self, r: &Row) -> bool {
+        let in_scope = match self.scope {
+            ViewScope::All => true,
+            ViewScope::WorkingCopy => r.origin == Origin::Local,
+            ViewScope::NotCheckedOut => r.origin == Origin::Remote,
+        };
+        if !in_scope {
+            return false;
+        }
         match r.state {
             State::Folder => self.folders,
             State::Unchanged => self.unchanged,
@@ -159,8 +171,8 @@ impl Filters {
             State::Conflict | State::NeedsPatch => self.conflicts,
             State::Unknown => self.unknown && !self.hide_unknown,
             State::Missing => self.missing && !self.hide_missing,
-            // Names the repository has but this working copy has not checked out are
-            // always shown; they are the point of the server listing.
+            // Repository names have no local state to filter; the scope decides whether
+            // they are in the list at all.
             State::Remote => !r.is_dir || self.folders,
         }
     }
@@ -175,26 +187,39 @@ impl Filters {
             State::Conflict | State::NeedsPatch => self.conflicts,
             State::Unknown => self.unknown,
             State::Missing => self.missing,
-            State::Remote => true,
+            State::Remote => self.scope != ViewScope::WorkingCopy,
         }
     }
 
     /// Is the state's box ticked at all, whether or not "hide" keeps its rows out of the list?
     /// Used by the Show menu to say which states the list is filtering on.
     pub(super) fn filtering(&self) -> Vec<&'static str> {
-        let all = [
+        let mut hidden = Vec::new();
+        for (state, name) in [
             (State::Unchanged, "up-to-date"),
             (State::Modified, "modified"),
             (State::Added, "added"),
             (State::Removed, "removed"),
             (State::Conflict, "conflicts"),
-            (State::Unknown, "not in project"),
-            (State::Missing, "missing"),
-        ];
-        all.iter()
-            .filter(|(s, _)| !self.enabled(*s))
-            .map(|(_, n)| *n)
-            .collect()
+        ] {
+            if !self.enabled(state) {
+                hidden.push(name);
+            }
+        }
+        if !self.unknown || self.hide_unknown {
+            hidden.push("untracked");
+        }
+        if !self.missing || self.hide_missing {
+            hidden.push("missing locally");
+        }
+        if self.scope == ViewScope::NotCheckedOut {
+            hidden.push("working copy (scope)");
+        }
+        hidden
+    }
+
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -266,13 +291,7 @@ impl App {
         }
         let search = Search::new(&self.search);
         let mut order: Vec<usize> = (0..self.rows.len())
-            .filter(|i| {
-                let r = &self.rows[*i];
-                self.filters.shows(r)
-                    && search
-                        .as_ref()
-                        .map_or(true, |s| s.matches(display_name(&r.name, r.is_dir)))
-            })
+            .filter(|i| self.row_matches(&self.rows[*i], search.as_ref()))
             .collect();
         let key = self.sort;
         let ascending = self.sort_asc;
@@ -335,8 +354,8 @@ impl App {
         out.push_str("  Locally Removed     revision recorded as -1\n");
         out.push_str("  Needs Patch         the recorded date begins with '/' (already patched)\n");
         out.push_str("  Unresolved Conflict the recorded date says 'Result of merge'\n");
-        out.push_str("  Missing             CVS/Entries names a file that is not on disk\n");
-        out.push_str("  Not in project      a file on disk that CVS/Entries does not name\n");
+        out.push_str("  Missing locally     CVS/Entries names a file that is not on disk\n");
+        out.push_str("  Untracked           a file on disk that CVS/Entries does not name\n");
         out
     }
 
@@ -365,6 +384,32 @@ impl App {
         v
     }
 
+    pub(super) fn scope_counts(&self) -> (usize, usize) {
+        let local = self
+            .rows
+            .iter()
+            .filter(|row| row.origin == Origin::Local)
+            .count();
+        (local, self.rows.len() - local)
+    }
+
+    /// What the status bar and the scope bar may say about the repository side.
+    /// A listing that is not ready must never be reported as zero.
+    pub(super) fn remote_status_label(&self) -> String {
+        let (_, remote) = self.scope_counts();
+        match self.remote_state {
+            RemoteState::Off => "Not checked out: unavailable".to_string(),
+            RemoteState::Loading => "Checking server…".to_string(),
+            RemoteState::Ready => format!("{remote} not checked out"),
+            RemoteState::Failed => "Server list unavailable".to_string(),
+        }
+    }
+
+    pub(super) fn has_active_filter(&self) -> bool {
+        !self.filters.is_default() || !self.search.trim().is_empty()
+    }
+
+    #[cfg(test)]
     pub(super) fn selected_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .selected
@@ -376,14 +421,32 @@ impl App {
         names
     }
 
-    /// The selected names that exist in the working copy. Commands such as update,
-    /// commit or edit must not be given a name that is only on the server.
+    /// The selected names that are visible in the current filter. Copy actions use this,
+    /// so a row hidden by a filter is not copied behind the user's back.
+    pub(super) fn selected_visible_names(&self) -> Vec<String> {
+        let search = Search::new(&self.search);
+        let mut names: Vec<String> = self
+            .selected
+            .iter()
+            .filter_map(|i| self.rows.get(*i))
+            .filter(|row| self.row_matches(row, search.as_ref()))
+            .map(|row| row.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The selected names that exist in the working copy and are visible. Commands such
+    /// as update, commit or edit must not be given a name that is not checked out or
+    /// hidden by the current view.
     pub(super) fn selected_local_names(&self) -> Vec<String> {
+        let search = Search::new(&self.search);
         let mut names: Vec<String> = self
             .selected
             .iter()
             .filter_map(|i| self.rows.get(*i))
             .filter(|row| row.origin == Origin::Local)
+            .filter(|row| self.row_matches(row, search.as_ref()))
             .map(|row| row.name.clone())
             .collect();
         names.sort();
@@ -397,6 +460,59 @@ impl App {
                 self.rows
                     .get(*index)
                     .is_some_and(|row| row.origin == Origin::Remote)
+            })
+    }
+
+    /// How many selected rows the current filter does not show.
+    pub(super) fn hidden_selected_count(&self) -> usize {
+        let search = Search::new(&self.search);
+        self.selected
+            .iter()
+            .filter(|index| {
+                self.rows
+                    .get(**index)
+                    .map_or(true, |row| !self.row_matches(row, search.as_ref()))
+            })
+            .count()
+    }
+
+    pub(super) fn clear_hidden_selection(&mut self) {
+        let search = Search::new(&self.search);
+        let visible: Vec<usize> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|index| {
+                self.rows
+                    .get(*index)
+                    .is_some_and(|row| self.row_matches(row, search.as_ref()))
+            })
+            .collect();
+        self.selected = visible.into_iter().collect();
+        if self
+            .anchor
+            .is_some_and(|index| !self.selected.contains(&index))
+        {
+            self.anchor = None;
+        }
+    }
+
+    pub(super) fn select_all_shown(&mut self) {
+        let search = Search::new(&self.search);
+        self.selected = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| self.row_matches(row, search.as_ref()))
+            .map(|(index, _)| index)
+            .collect();
+        self.anchor = self.selected.iter().copied().min();
+    }
+
+    fn row_matches(&self, row: &Row, search: Option<&Search>) -> bool {
+        self.filters.shows(row)
+            && search.map_or(true, |search| {
+                search.matches(display_name(&row.name, row.is_dir))
             })
     }
 
@@ -478,7 +594,7 @@ fn is_dir(p: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::app::tests::{app_with_rows, row};
-    use cvsdesk::prefs::ViewState;
+    use cvsdesk::prefs::{ViewScope, ViewState};
     use cvsdesk::remote::Listing;
 
     #[test]
@@ -624,28 +740,59 @@ mod tests {
     }
 
     #[test]
-    fn server_rows_are_always_shown_and_add_no_filter_switch() {
+    fn working_copy_scope_hides_not_checked_out_rows() {
+        let mut remote = row("remote.txt", false);
+        remote.origin = Origin::Remote;
+        remote.state = State::Remote;
+        let mut app = app_with_rows(vec![row("local.txt", false), remote]);
+        app.filters.scope = ViewScope::WorkingCopy;
+        app.ensure_order();
+        assert_eq!(app.order, vec![0]);
+
+        app.filters.scope = ViewScope::NotCheckedOut;
+        app.order_dirty = true;
+        app.ensure_order();
+        assert_eq!(app.order, vec![1]);
+
+        app.filters.scope = ViewScope::All;
+        app.order_dirty = true;
+        app.ensure_order();
+        assert_eq!(app.order.len(), 2);
+    }
+
+    #[test]
+    fn the_default_filters_are_the_working_copy_scope() {
+        assert_eq!(Filters::default().scope, ViewScope::WorkingCopy);
+    }
+
+    #[test]
+    fn the_scope_controls_repository_rows_and_folders_still_apply() {
         let mut remote = row("server.txt", false);
         remote.origin = Origin::Remote;
         remote.state = State::Remote;
 
-        let filters = Filters::default();
-        assert!(filters.shows(&remote));
-        assert!(filters.enabled(State::Remote));
-        assert!(!filters.filtering().contains(&"on server"));
+        let working_copy = Filters::default();
+        assert!(!working_copy.shows(&remote));
+        assert!(!working_copy.enabled(State::Remote));
+
+        let mut all = Filters {
+            scope: ViewScope::All,
+            ..Filters::default()
+        };
+        assert!(all.shows(&remote));
 
         let mut remote_folder = row("server-folder", true);
         remote_folder.origin = Origin::Remote;
         remote_folder.state = State::Remote;
-        let mut no_folders = Filters::default();
-        no_folders.folders = false;
-        assert!(!no_folders.shows(&remote_folder));
-        assert!(no_folders.shows(&remote));
+        all.folders = false;
+        assert!(!all.shows(&remote_folder));
+        assert!(all.shows(&remote));
     }
 
     #[test]
     fn search_finds_a_server_only_name() {
         let mut app = app_with_rows(vec![row("local.txt", false)]);
+        app.filters.scope = ViewScope::All;
         app.apply_remote_listing(Listing {
             files: vec!["remote.txt".to_string()],
             dirs: vec!["RemoteFolder".to_string()],
@@ -699,8 +846,8 @@ mod tests {
             ("Locally Removed", 0),
             ("Needs Patch", 0),
             ("Unresolved Conflict", 0),
-            ("Missing", 0),
-            ("Not in project", 1),
+            ("Missing locally", 0),
+            ("Untracked", 1),
         ] {
             let line = sheet
                 .lines()
@@ -750,6 +897,7 @@ mod tests {
     #[test]
     fn filters_read_and_write_every_view_switch() {
         let view = ViewState {
+            scope: ViewScope::All,
             show_unchanged: false,
             show_modified: false,
             show_added: false,

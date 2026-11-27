@@ -11,7 +11,7 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use cvsdesk::cvs_client::engine::{self, CancelToken, Request, Sink};
 use cvsdesk::entries::{self, Origin};
 
-use crate::app::App;
+use crate::app::{App, RemoteState};
 
 /// One message from the worker.
 pub(super) enum Msg {
@@ -151,12 +151,14 @@ impl App {
             return;
         }
         self.remote_seq = self.remote_seq.wrapping_add(1);
+        self.remote_state = RemoteState::Loading;
         self.remote = Some(Loader::start(&self.dir, &self.repository, self.remote_seq));
     }
 
     /// Drop the running listing, if any. `Loader::drop` cancels its worker.
     pub(super) fn cancel_remote(&mut self) {
         self.remote = None;
+        self.remote_state = RemoteState::Off;
         self.remote_lines.clear();
     }
 
@@ -196,6 +198,7 @@ impl App {
         match finished {
             Ok(0) => {
                 if let Some(error) = cvsdesk::remote::error_line(&lines) {
+                    self.remote_state = RemoteState::Failed;
                     self.status = format!("Server list unavailable: {}", error);
                     return;
                 }
@@ -204,9 +207,11 @@ impl App {
                 self.apply_remote_listing(listing);
             }
             Ok(code) => {
+                self.remote_state = RemoteState::Failed;
                 self.status = format!("Server list unavailable (cvs returned {})", code);
             }
             Err(error) => {
+                self.remote_state = RemoteState::Failed;
                 self.status = format!("Server list unavailable: {}", error);
             }
         }
@@ -222,6 +227,7 @@ impl App {
         });
         let local = std::mem::take(&mut self.rows);
         self.rows = cvsdesk::remote::merge_rows(local, &listing);
+        self.remote_state = RemoteState::Ready;
         if had_remote_selection {
             self.selected.clear();
             self.anchor = None;

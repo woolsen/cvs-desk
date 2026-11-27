@@ -58,10 +58,10 @@ impl State {
             State::Removed => "Locally Removed",
             State::Conflict => "Unresolved Conflict",
             State::NeedsPatch => "Needs Patch",
-            State::Missing => "Missing",
-            State::Unknown => "Not in project",
+            State::Missing => "Missing locally",
+            State::Unknown => "Untracked",
             State::Folder => "Folder",
-            State::Remote => "On server",
+            State::Remote => "Not checked out",
         }
     }
 
@@ -102,6 +102,7 @@ pub struct Loaded {
     pub has_cvs: bool,
     pub root: String,
     pub repository: String,
+    pub partial_checkout: bool,
 }
 
 /// Parse the text of a `CVS/Entries` file. Returns the entries and how many duplicated
@@ -361,6 +362,7 @@ fn is_hidden(path: &Path, name: &str) -> bool {
 pub fn load(dir: &Path) -> Loaded {
     let cvs_dir = dir.join("CVS");
     let has_cvs = cvs_dir.is_dir();
+    let partial_checkout = cvs_dir.join("Entries.Static").is_file();
     let mut notes = Vec::new();
 
     let entries_path = cvs_dir.join("Entries");
@@ -416,7 +418,7 @@ pub fn load(dir: &Path) -> Loaded {
         known.insert(e.name.clone());
         // A tracked file that is hidden on disk is hidden from the list too, the same
         // way Explorer treats it. Its name still counts as known, so the loose-file
-        // pass cannot bring it back as "not in project".
+        // pass cannot bring it back as "untracked".
         if is_hidden(&dir.join(&e.name), &e.name) {
             continue;
         }
@@ -472,6 +474,7 @@ pub fn load(dir: &Path) -> Loaded {
         has_cvs,
         root,
         repository,
+        partial_checkout,
     }
 }
 
@@ -979,8 +982,33 @@ mod tests {
     }
 
     #[test]
+    fn entries_static_marks_a_partial_checkout() {
+        let dir = temp_dir("partial-checkout");
+        std::fs::create_dir_all(dir.join("CVS")).unwrap();
+        std::fs::write(dir.join("CVS").join("Entries"), "").unwrap();
+        std::fs::write(dir.join("CVS").join("Entries.Static"), "").unwrap();
+
+        assert!(load(&dir).partial_checkout);
+
+        let plain = temp_dir("full-checkout");
+        std::fs::create_dir_all(plain.join("CVS")).unwrap();
+        std::fs::write(plain.join("CVS").join("Entries"), "").unwrap();
+        assert!(!load(&plain).partial_checkout);
+
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(plain).ok();
+    }
+
+    #[test]
+    fn the_list_uses_working_copy_words() {
+        assert_eq!(State::Remote.label(), "Not checked out");
+        assert_eq!(State::Unknown.label(), "Untracked");
+        assert_eq!(State::Missing.label(), "Missing locally");
+    }
+
+    #[test]
     fn a_server_only_row_is_marked_remote_and_not_a_local_change() {
-        assert_eq!(State::Remote.label(), "On server");
+        assert_eq!(State::Remote.label(), "Not checked out");
         assert!(!State::Remote.is_change());
 
         let dir = temp_dir("remote-state");

@@ -60,7 +60,7 @@ pub fn color(kind: FileKind) -> egui::Color32 {
     }
 }
 
-/// The icon of a row whose file is gone; the state column says "Missing".
+/// The icon of a row whose file is gone; the state column says "Missing locally".
 pub const MISSING: egui::Color32 = egui::Color32::from_gray(175);
 
 /// Draws the icon with its left edge at `left`, centred on `center_y`.

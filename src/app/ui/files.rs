@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use cvsdesk::cvs::Cmd;
 use cvsdesk::entries::{self, Origin, State};
 use cvsdesk::filekind::FileKind;
+use cvsdesk::prefs::ViewScope;
 use cvsdesk::util::truncate_columns;
 
 use super::{fonts, icons, state_color, typography};
-use crate::app::files::{display_name, search_id, SortKey};
-use crate::app::App;
+use crate::app::files::{display_name, search_id, Filters, SortKey};
+use crate::app::{App, RemoteState};
 
 /// What a nav-bar button asked for, handled after the row has been drawn.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,6 +76,11 @@ const HEADER_TEXT_ACTIVE: egui::Color32 = egui::Color32::from_gray(24);
 const HEADER_HOVER: egui::Color32 = egui::Color32::from_gray(236);
 const HEADER_ARROW_SIZE: f32 = 12.0;
 const HEADER_ARROW_GAP: f32 = 4.0;
+
+/// A selected row's band and a hovered row's band. The list paints the full band, so
+/// a run of selected rows reads as one block instead of a stack of stripes.
+const ROW_SELECTED_BG: egui::Color32 = egui::Color32::from_rgb(204, 224, 247);
+const ROW_HOVER_BG: egui::Color32 = egui::Color32::from_rgb(238, 244, 251);
 
 /// Column positions inside one row, measured from the row's left edge. The fixed
 /// columns sum to the window width, so nothing drifts or overflows at the right edge.
@@ -511,10 +517,123 @@ impl App {
         }
     }
 
+    /// The scope bar: the one place that says whether the repository side is hidden,
+    /// still loading, or unavailable. It sits above the column headings so the source
+    /// of the list is always on screen.
+    fn ui_scope_bar(&mut self, ui: &mut egui::Ui) {
+        let (_, remote) = self.scope_counts();
+        let remote_label = match self.remote_state {
+            RemoteState::Off => "Not checked out (—)".to_string(),
+            RemoteState::Loading => "Not checked out (checking…)".to_string(),
+            RemoteState::Ready => format!("Not checked out ({remote})"),
+            RemoteState::Failed => "Not checked out (unavailable)".to_string(),
+        };
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if ui
+                .selectable_label(
+                    self.filters.scope == ViewScope::WorkingCopy,
+                    "Working copy",
+                )
+                .on_hover_text(
+                    "Rows that belong to this local checkout, including missing and untracked files.",
+                )
+                .clicked()
+            {
+                chosen = Some(ViewScope::WorkingCopy);
+            }
+            if ui
+                .selectable_label(
+                    self.filters.scope == ViewScope::NotCheckedOut,
+                    remote_label,
+                )
+                .on_hover_text(
+                    "Repository names that are not in this working copy. Read with rlog -R for this folder only.",
+                )
+                .clicked()
+            {
+                chosen = Some(ViewScope::NotCheckedOut);
+            }
+            if ui
+                .selectable_label(self.filters.scope == ViewScope::All, "All names")
+                .on_hover_text("Working-copy rows together with repository-only names.")
+                .clicked()
+            {
+                chosen = Some(ViewScope::All);
+            }
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!("{} of {} rows", self.order.len(), self.rows.len()))
+                    .small()
+                    .weak(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.has_active_filter() && ui.small_button("Clear").clicked() {
+                    self.filters = Filters::default();
+                    self.search.clear();
+                    self.order_dirty = true;
+                }
+                if !self.selected.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("{} selected", self.selected.len()))
+                            .small()
+                            .weak(),
+                    );
+                }
+            });
+        });
+        if let Some(scope) = chosen {
+            if scope != self.filters.scope {
+                self.filters.scope = scope;
+                self.order_dirty = true;
+            }
+        }
+
+        let hidden = self.hidden_selected_count();
+        if hidden > 0 {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} selected · {} hidden by filters",
+                        self.selected.len(),
+                        hidden
+                    ))
+                    .small()
+                    .color(egui::Color32::from_rgb(150, 90, 0)),
+                );
+                if ui.small_button("Clear hidden").clicked() {
+                    self.clear_hidden_selection();
+                }
+            });
+        }
+
+        if self.partial_checkout {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Partial checkout (CVS/Entries.Static) — Update will not add missing files here.",
+                    )
+                    .small()
+                    .color(egui::Color32::from_rgb(70, 100, 135)),
+                )
+                .on_hover_text(
+                    "CVS marked this folder static, so update will not fetch new files into it.",
+                );
+            });
+        }
+    }
+
     pub(super) fn ui_file_list(&mut self, ui: &mut egui::Ui) {
         self.ensure_order();
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+        {
+            self.select_all_shown();
+        }
         self.ui_nav_bar(ui);
         ui.separator();
+        self.ui_scope_bar(ui);
 
         // One heading band, drawn from the same column geometry as the rows.
         self.ui_list_header(ui);
@@ -524,166 +643,173 @@ impl App {
         let mut menu_action: Option<(FileMenuAction, usize)> = None;
         let mut open_dir: Option<PathBuf> = None;
         let mut open_missing_dir: Option<String> = None;
-        let row_h = typography::LIST_ROW_H;
+        // The spacing the list would put between rows moves inside the row band, so
+        // adjacent selected rows paint as one block; the text keeps its distance and so
+        // does the total scroll height.
+        let row_gap = ui.spacing().item_spacing.y;
+        let row_h = typography::LIST_ROW_H + row_gap;
         // Only vertical: every cell truncates to its column, so horizontal scrolling
         // could never line the rows up with a heading band that stays put.
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, row_h, self.order.len(), |ui, range| {
-                ui.set_min_width(ui.available_width());
-                // Every column is painted from the same body font, and a Chinese letter
-                // takes two of its cells; asking the font keeps truncation in step with
-                // the scale instead of guessing a cell width.
-                let body = egui::TextStyle::Body.resolve(ui.style());
-                let cell = body.size / 2.0;
-                for pos in range {
-                    let idx = self.order[pos];
-                    let r = &self.rows[idx];
-                    let sel = self.selected.contains(&idx);
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), row_h),
-                        egui::Sense::click(),
-                    );
-                    if resp.clicked() {
-                        clicked_at = Some(pos);
-                    }
-                    // A folder opens on the second click, as in Explorer and Xftp. A
-                    // folder that is only a server name or a missing `D` record gets its
-                    // empty control-file skeleton first.
-                    if r.is_dir && resp.double_clicked() {
-                        let path = self.dir.join(&r.name);
-                        if path.is_dir() {
-                            open_dir = Some(path);
-                        } else {
-                            open_missing_dir = Some(display_name(&r.name, true).to_string());
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, row_h, self.order.len(), |ui, range| {
+                    ui.set_min_width(ui.available_width());
+                    // Every column is painted from the same body font, and a Chinese letter
+                    // takes two of its cells; asking the font keeps truncation in step with
+                    // the scale instead of guessing a cell width.
+                    let body = egui::TextStyle::Body.resolve(ui.style());
+                    let cell = body.size / 2.0;
+                    for pos in range {
+                        let idx = self.order[pos];
+                        let r = &self.rows[idx];
+                        let sel = self.selected.contains(&idx);
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), row_h),
+                            egui::Sense::click(),
+                        );
+                        if resp.clicked() {
+                            clicked_at = Some(pos);
                         }
-                    }
-                    if resp.secondary_clicked() {
-                        right_clicked_at = Some(pos);
-                    }
-                    let remote = r.origin == Origin::Remote;
-                    resp.context_menu(|ui| {
-                        let mut pick = |ui: &mut egui::Ui, label: &str, action: FileMenuAction| {
-                            if ui.button(label).clicked() {
-                                menu_action = Some((action, idx));
-                                ui.close();
+                        // A folder opens on the second click, as in Explorer and Xftp. A
+                        // folder that is only a server name or a missing `D` record gets its
+                        // empty control-file skeleton first.
+                        if r.is_dir && resp.double_clicked() {
+                            let path = self.dir.join(&r.name);
+                            if path.is_dir() {
+                                open_dir = Some(path);
+                            } else {
+                                open_missing_dir = Some(display_name(&r.name, true).to_string());
                             }
+                        }
+                        if resp.secondary_clicked() {
+                            right_clicked_at = Some(pos);
+                        }
+                        let remote = r.origin == Origin::Remote;
+                        resp.context_menu(|ui| {
+                            let mut pick = |ui: &mut egui::Ui, label: &str, action: FileMenuAction| {
+                                if ui.button(label).clicked() {
+                                    menu_action = Some((action, idx));
+                                    ui.close();
+                                }
+                            };
+                            pick(ui, "Open", FileMenuAction::Open);
+                            if !remote {
+                                ui.separator();
+                                pick(ui, "Update", FileMenuAction::Update);
+                                pick(ui, "Commit…", FileMenuAction::Commit);
+                                pick(ui, "Diff", FileMenuAction::Diff);
+                                if !r.is_dir {
+                                    pick(ui, "File History…", FileMenuAction::History);
+                                }
+                                pick(ui, "Tags…", FileMenuAction::Tags);
+                                pick(ui, "Status", FileMenuAction::Status);
+                            }
+                            ui.separator();
+                            pick(ui, "Copy name", FileMenuAction::CopyName);
+                            pick(ui, "Copy full path", FileMenuAction::CopyPath);
+                            if !remote {
+                                ui.separator();
+                                pick(ui, "Show in Explorer", FileMenuAction::ShowInExplorer);
+                                pick(ui, "Move To Trash", FileMenuAction::MoveToTrash);
+                            }
+                        });
+                        let bg = if sel {
+                            ROW_SELECTED_BG
+                        } else if resp.hovered() {
+                            ROW_HOVER_BG
+                        } else {
+                            egui::Color32::TRANSPARENT
                         };
-                        pick(ui, "Open", FileMenuAction::Open);
-                        if !remote {
-                            ui.separator();
-                            pick(ui, "Update", FileMenuAction::Update);
-                            pick(ui, "Commit…", FileMenuAction::Commit);
-                            pick(ui, "Diff", FileMenuAction::Diff);
-                            if !r.is_dir {
-                                pick(ui, "File History…", FileMenuAction::History);
+                        let tip = if r.is_dir {
+                            if remote {
+                                format!(
+                                    "{}\nDouble-click to create this empty folder (files are not checked out)",
+                                    r.name
+                                )
+                            } else {
+                                format!("{}\nDouble-click to open this folder", r.name)
                             }
-                            pick(ui, "Tags…", FileMenuAction::Tags);
-                            pick(ui, "Status", FileMenuAction::Status);
-                        }
-                        ui.separator();
-                        pick(ui, "Copy name", FileMenuAction::CopyName);
-                        pick(ui, "Copy full path", FileMenuAction::CopyPath);
-                        if !remote {
-                            ui.separator();
-                            pick(ui, "Show in Explorer", FileMenuAction::ShowInExplorer);
-                            pick(ui, "Move To Trash", FileMenuAction::MoveToTrash);
-                        }
-                    });
-                    let bg = if sel {
-                        egui::Color32::from_rgb(204, 224, 247)
-                    } else if resp.hovered() {
-                        egui::Color32::from_rgb(238, 244, 251)
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    };
-                    let tip = if r.is_dir {
-                        if remote {
-                            format!(
-                                "{}\nDouble-click to create this empty folder (files stay on server)",
-                                r.name
-                            )
                         } else {
-                            format!("{}\nDouble-click to open this folder", r.name)
-                        }
-                    } else {
-                        r.name.clone()
-                    };
-                    resp.on_hover_text(tip);
-                    let painter = ui.painter();
-                    painter.rect_filled(rect, 0.0, bg);
-                    let color = state_color(r.state);
-                    let kind = FileKind::of(&r.name, r.is_dir);
-                    let icon_color = if r.state == State::Missing {
-                        icons::MISSING
-                    } else {
-                        icons::color(kind)
-                    };
-                    let g = ListGeometry::for_width(rect.width());
-                    let left = rect.left();
-                    icons::paint(painter, left + ICON_INSET, rect.center().y, kind, icon_color);
-                    let name_x = left + ICON_INSET + icons::GAP;
-                    let clip = egui::Rect::from_min_max(
-                        egui::pos2(name_x, rect.top()),
-                        egui::pos2(name_x + g.name_w, rect.bottom()),
-                    );
-                    painter.with_clip_rect(clip).text(
-                        egui::pos2(name_x, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        truncate_columns(
-                            display_name(&r.name, r.is_dir),
-                            (g.name_w / cell) as usize,
-                        ),
-                        body.clone(),
-                        color,
-                    );
-                    let put = |txt: &str, x: f32, w: f32, color: egui::Color32| {
-                        painter.text(
-                            egui::pos2(x, rect.center().y),
+                            r.name.clone()
+                        };
+                        resp.on_hover_text(tip);
+                        let painter = ui.painter();
+                        painter.rect_filled(rect, 0.0, bg);
+                        let color = state_color(r.state);
+                        let kind = FileKind::of(&r.name, r.is_dir);
+                        let icon_color = if r.state == State::Missing {
+                            icons::MISSING
+                        } else {
+                            icons::color(kind)
+                        };
+                        let g = ListGeometry::for_width(rect.width());
+                        let left = rect.left();
+                        icons::paint(painter, left + ICON_INSET, rect.center().y, kind, icon_color);
+                        let name_x = left + ICON_INSET + icons::GAP;
+                        let clip = egui::Rect::from_min_max(
+                            egui::pos2(name_x, rect.top()),
+                            egui::pos2(name_x + g.name_w, rect.bottom()),
+                        );
+                        painter.with_clip_rect(clip).text(
+                            egui::pos2(name_x, rect.center().y),
                             egui::Align2::LEFT_CENTER,
-                            truncate_columns(txt, (w / cell) as usize),
+                            truncate_columns(
+                                display_name(&r.name, r.is_dir),
+                                (g.name_w / cell) as usize,
+                            ),
                             body.clone(),
                             color,
                         );
-                    };
-                    put(r.state.label(), left + g.state_x, STATE_W, color);
-                    put(
-                        if r.revision.is_empty() { "-" } else { &r.revision },
-                        left + g.revision_x,
-                        REVISION_W,
-                        color,
-                    );
-                    put(
-                        if r.options.is_empty() { "" } else { &r.options },
-                        left + g.opts_x,
-                        OPTS_W,
-                        egui::Color32::from_gray(120),
-                    );
-                    put(
-                        if r.tag.is_empty() { "" } else { &r.tag },
-                        left + g.tag_x,
-                        TAG_W,
-                        egui::Color32::from_rgb(90, 90, 120),
-                    );
-                    put(
-                        &pretty_time(&r.timestamp),
-                        left + g.date_x,
-                        DATE_W,
-                        egui::Color32::from_gray(110),
-                    );
-                }
-                if self.order.is_empty() {
-                    ui.add_space(12.0);
-                    let message = if self.loading.is_some() {
-                        "Reading folder…".to_string()
-                    } else if !self.search.trim().is_empty() {
-                        format!("No name matches \"{}\".", self.search.trim())
-                    } else {
-                        "Nothing to show with these filters.".to_string()
-                    };
-                    ui.label(egui::RichText::new(message).italics().weak());
-                }
-            });
+                        let put = |txt: &str, x: f32, w: f32, color: egui::Color32| {
+                            painter.text(
+                                egui::pos2(x, rect.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                truncate_columns(txt, (w / cell) as usize),
+                                body.clone(),
+                                color,
+                            );
+                        };
+                        put(r.state.label(), left + g.state_x, STATE_W, color);
+                        put(
+                            if r.revision.is_empty() { "-" } else { &r.revision },
+                            left + g.revision_x,
+                            REVISION_W,
+                            color,
+                        );
+                        put(
+                            if r.options.is_empty() { "" } else { &r.options },
+                            left + g.opts_x,
+                            OPTS_W,
+                            egui::Color32::from_gray(120),
+                        );
+                        put(
+                            if r.tag.is_empty() { "" } else { &r.tag },
+                            left + g.tag_x,
+                            TAG_W,
+                            egui::Color32::from_rgb(90, 90, 120),
+                        );
+                        put(
+                            &pretty_time(&r.timestamp),
+                            left + g.date_x,
+                            DATE_W,
+                            egui::Color32::from_gray(110),
+                        );
+                    }
+                    if self.order.is_empty() {
+                        ui.add_space(12.0);
+                        let message = if self.loading.is_some() {
+                            "Reading folder…".to_string()
+                        } else if !self.search.trim().is_empty() {
+                            format!("No name matches \"{}\".", self.search.trim())
+                        } else {
+                            "Nothing to show with these filters.".to_string()
+                        };
+                        ui.label(egui::RichText::new(message).italics().weak());
+                    }
+                });
+        });
 
         // A right click selects the row under the pointer unless it is already part of
         // the selection, so a command can act on the whole selection it was opened on.
@@ -758,8 +884,7 @@ impl App {
                     return;
                 }
                 if row.origin == Origin::Remote {
-                    self.status =
-                        "The selected file is only on the server; check it out first".into();
+                    self.status = "The selected file is not checked out; check it out first".into();
                     return;
                 }
                 let name = row.name.clone();
@@ -777,11 +902,11 @@ impl App {
             FileMenuAction::Tags => self.open_tags(),
             FileMenuAction::Status => self.cvs_command(Cmd::Status),
             FileMenuAction::CopyName => {
-                ctx.copy_text(self.selected_names().join("\n"));
+                ctx.copy_text(self.selected_visible_names().join("\n"));
             }
             FileMenuAction::CopyPath => {
                 let paths: Vec<String> = self
-                    .selected_names()
+                    .selected_visible_names()
                     .iter()
                     .map(|name| self.dir.join(name).display().to_string())
                     .collect();
@@ -792,8 +917,7 @@ impl App {
                     return;
                 };
                 if row.origin == Origin::Remote {
-                    self.status =
-                        "The selected item is only on the server; check it out first".into();
+                    self.status = "The selected item is not checked out; check it out first".into();
                     return;
                 }
                 let name = row.name.clone();
@@ -1135,6 +1259,29 @@ mod tests {
             .map(|(_, pos)| pos)
     }
 
+    /// The backgrounds painted under selected rows, top to bottom.
+    fn selection_bands(output: &egui::FullOutput) -> Vec<egui::Rect> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Rect(rect) if rect.fill == ROW_SELECTED_BG => {
+                    out.push(rect.rect);
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut out);
+        }
+        out.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        out
+    }
+
     /// Font metrics differ slightly between machines; a sub-pixel difference is not a
     /// layout bug. Keep the tolerance under one logical pixel.
     const LAYOUT_TOL: f32 = 0.5;
@@ -1204,6 +1351,28 @@ mod tests {
         assert_eq!(x("Opts"), x("-kb"));
         assert_eq!(x("Sticky tag"), x("HEAD"));
         assert_eq!(x("Recorded"), x(&pretty_time("Sat Nov 22 09:14:03 2026")));
+    }
+
+    #[test]
+    fn a_selected_range_reads_as_one_continuous_band() {
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![
+            row("alpha.txt", false),
+            row("beta.txt", false),
+            row("gamma.txt", false),
+        ]);
+        app.selected = HashSet::from([1, 2]);
+
+        let frame = run_list(&ctx, &mut app, Vec::new());
+        let bands = selection_bands(&frame);
+
+        assert_eq!(bands.len(), 2, "one background per selected row");
+        assert!(
+            (bands[0].bottom() - bands[1].top()).abs() < 0.01,
+            "adjacent selected rows must meet without a white stripe: {:?} then {:?}",
+            bands[0],
+            bands[1]
+        );
     }
 
     #[test]

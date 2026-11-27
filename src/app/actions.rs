@@ -90,6 +90,16 @@ impl App {
             self.status = "The selected rows are not checked out; check them out first".into();
             return;
         }
+        if !self.selected.is_empty() && self.selected_local_names().is_empty() {
+            self.status =
+                "The selected rows are hidden by the current filter; clear it or select visible rows"
+                    .into();
+            return;
+        }
+        if self.selected.is_empty() && self.has_active_filter() {
+            self.status = "Select files, or clear the filter to commit this folder".into();
+            return;
+        }
         self.open_dialog(Dialog::Commit {
             text,
             file: String::new(),
@@ -100,6 +110,16 @@ impl App {
     pub(super) fn open_diff_dialog(&mut self) {
         if self.selection_is_all_remote() {
             self.status = "The selected rows are not checked out; check them out first".into();
+            return;
+        }
+        if !self.selected.is_empty() && self.selected_local_names().is_empty() {
+            self.status =
+                "The selected rows are hidden by the current filter; clear it or select visible rows"
+                    .into();
+            return;
+        }
+        if self.selected.is_empty() && self.has_active_filter() {
+            self.status = "Select files, or clear the filter to diff this folder".into();
             return;
         }
         self.open_dialog(Dialog::Diff {
@@ -114,6 +134,12 @@ impl App {
     pub(super) fn cvs_command(&mut self, cmd: Cmd) {
         if self.selection_is_all_remote() {
             self.status = "The selected rows are not checked out; check them out first".into();
+            return;
+        }
+        if !self.selected.is_empty() && self.selected_local_names().is_empty() {
+            self.status =
+                "The selected rows are hidden by the current filter; clear it or select visible rows"
+                    .into();
             return;
         }
         let files = self.selected_local_names();
@@ -238,6 +264,12 @@ impl App {
             return;
         }
         let scope = self.selected_local_names();
+        if !self.selected.is_empty() && scope.is_empty() {
+            self.status =
+                "The selected rows are hidden by the current filter; clear it or select visible rows"
+                    .into();
+            return;
+        }
         let label = if scope.is_empty() {
             "This folder and its subfolders".to_string()
         } else {
@@ -526,6 +558,12 @@ impl App {
             return;
         }
         let files = self.selected_local_names();
+        if !self.selected.is_empty() && files.is_empty() {
+            self.status =
+                "The selected rows are hidden by the current filter; clear it or select visible rows"
+                    .into();
+            return;
+        }
         let mut req = CommandRequest::new(Cmd::Edit);
         req.files = files;
         req.extra = vec!["-c".into()];
@@ -534,7 +572,7 @@ impl App {
 
     /// Open a folder that is not on disk yet by writing only its CVS control files, then
     /// let the normal folder navigation show it. Its files stay on the server and are
-    /// listed as `On server` until an update fetches them.
+    /// listed as `Not checked out` until an update fetches them.
     pub(super) fn ensure_and_open_dir(&mut self, name: String) {
         if self.runner.running || self.loading.is_some() {
             self.status = "Wait for the running command or folder read to finish".into();
@@ -552,7 +590,7 @@ impl App {
         match cvsdesk::cvs_client::work::skeleton::ensure_child(&self.dir, &name) {
             Ok(_) => {
                 self.runner.lines.push(format!(
-                    "Created empty folder: {} (files stay on server)",
+                    "Created empty folder: {} (files are not checked out)",
                     name
                 ));
                 self.status = format!("Created empty folder: {}", name);
@@ -569,8 +607,7 @@ impl App {
     /// out, so the record goes with it.
     pub(super) fn move_to_trash(&mut self) {
         if self.selection_is_all_remote() {
-            self.status =
-                "The selected rows are not checked out; nothing local to delete".into();
+            self.status = "The selected rows are not checked out; nothing local to delete".into();
             return;
         }
         let names = self.selected_local_names();

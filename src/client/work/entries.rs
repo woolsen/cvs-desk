@@ -106,7 +106,7 @@ impl Entries {
     /// `CVS/Entries` when it finishes. If it is interrupted (the window is closed, the
     /// machine goes off) the journal stays behind, and cvs itself applies it the next time it
     /// opens the folder. Without that merge the `D/…` line of a folder can sit only in the
-    /// journal: the list calls the folder "Not in project" and the recursive walk skips it.
+    /// journal: the list calls the folder "Untracked" and the recursive walk skips it.
     /// Reading never writes - only a real cvs command may settle the journal.
     pub fn read(dir: &Path) -> Result<Entries> {
         let path = dir.join("CVS").join("Entries");

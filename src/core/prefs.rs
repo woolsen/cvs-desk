@@ -10,12 +10,45 @@ use toml::{Table, Value};
 
 use crate::entries::{build_cvsroot, ConnKind};
 
+/// Which side of the working copy the file list shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewScope {
+    WorkingCopy,
+    NotCheckedOut,
+    All,
+}
+
+impl Default for ViewScope {
+    fn default() -> Self {
+        Self::WorkingCopy
+    }
+}
+
+impl ViewScope {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::WorkingCopy => "working_copy",
+            Self::NotCheckedOut => "not_checked_out",
+            Self::All => "all",
+        }
+    }
+
+    pub fn from_token(text: &str) -> Self {
+        match text {
+            "all" => Self::All,
+            "not_checked_out" => Self::NotCheckedOut,
+            _ => Self::WorkingCopy,
+        }
+    }
+}
+
 /// The file list's remembered view: which rows are shown and how they are ordered.
 ///
 /// These are CVS Desk's own setting names, kept beside the older compatibility keys in
 /// the same file. The view state is owned and written by this program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewState {
+    pub scope: ViewScope,
     pub show_unchanged: bool,
     pub show_modified: bool,
     pub show_added: bool,
@@ -33,6 +66,7 @@ pub struct ViewState {
 impl Default for ViewState {
     fn default() -> Self {
         Self {
+            scope: ViewScope::default(),
             show_unchanged: true,
             show_modified: true,
             show_added: true,
@@ -367,6 +401,11 @@ impl Prefs {
                 "P_VendorNames" => p.vendor_names = string_list(value),
                 "P_ReleaseNames" => p.release_names = string_list(value),
                 "P_ImportModuleNames" => p.import_modules = string_list(value),
+                "ViewScope" => {
+                    if let Some(text) = value.as_str() {
+                        p.view.scope = ViewScope::from_token(text);
+                    }
+                }
                 "ViewShowUnchanged" => set_flag(&mut p.view.show_unchanged, value),
                 "ViewShowModified" => set_flag(&mut p.view.show_modified, value),
                 "ViewShowAdded" => set_flag(&mut p.view.show_added, value),
@@ -452,6 +491,7 @@ impl Prefs {
                 "P_VendorNames" => p.vendor_names = list(value),
                 "P_ReleaseNames" => p.release_names = list(value),
                 "P_ImportModuleNames" => p.import_modules = list(value),
+                "ViewScope" => p.view.scope = ViewScope::from_token(value),
                 "ViewShowUnchanged" => p.view.show_unchanged = flag,
                 "ViewShowModified" => p.view.show_modified = flag,
                 "ViewShowAdded" => p.view.show_added = flag,
@@ -540,6 +580,7 @@ impl Prefs {
 /// The view settings in the order they are written, using CVS Desk's own names.
 fn view_settings(view: &ViewState) -> Vec<(&'static str, Value)> {
     vec![
+        ("ViewScope", Value::String(view.scope.token().to_string())),
         ("ViewShowUnchanged", Value::Boolean(view.show_unchanged)),
         ("ViewShowModified", Value::Boolean(view.show_modified)),
         ("ViewShowAdded", Value::Boolean(view.show_added)),
@@ -1010,6 +1051,25 @@ mod tests {
             fresh.get("P_LastWorkingDir").and_then(|v| v.as_str()),
             Some("D:\\work")
         );
+    }
+
+    #[test]
+    fn the_default_scope_is_the_working_copy() {
+        assert_eq!(ViewState::default().scope, ViewScope::WorkingCopy);
+    }
+
+    #[test]
+    fn scope_round_trips_through_the_saved_view() {
+        let view = ViewState {
+            scope: ViewScope::NotCheckedOut,
+            ..ViewState::default()
+        };
+        let text = Prefs {
+            view: view.clone(),
+            ..Prefs::default()
+        }
+        .to_toml();
+        assert_eq!(Prefs::from_toml(&text).unwrap().view, view);
     }
 
     #[test]

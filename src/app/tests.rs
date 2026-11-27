@@ -15,7 +15,7 @@ use cvsdesk::tags::TagInfo;
 use super::dialogs::tags::TagsState;
 use super::dialogs::Dialog;
 use super::files::{Filters, SortKey};
-use super::{App, HistoryWait, OutputKind, TagWait, Trouble};
+use super::{App, HistoryWait, OutputKind, RemoteState, TagWait, Trouble};
 
 pub(super) fn row(name: &str, is_dir: bool) -> Row {
     Row {
@@ -49,6 +49,7 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         has_cvs: true,
         root: String::new(),
         repository: String::new(),
+        partial_checkout: false,
         selected: HashSet::new(),
         anchor: None,
         filters: Filters::default(),
@@ -66,6 +67,7 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         load_rx: None,
         loading: None,
         remote: None,
+        remote_state: RemoteState::Off,
         remote_enabled: false,
         remote_seq: 0,
         remote_lines: Vec::new(),
@@ -95,6 +97,7 @@ pub(super) fn loaded(rows: Vec<Row>) -> entries::Loaded {
         has_cvs: true,
         root: String::new(),
         repository: String::new(),
+        partial_checkout: false,
     }
 }
 
@@ -760,6 +763,61 @@ fn server_rows_join_the_list_and_stay_out_of_local_commands() {
 }
 
 #[test]
+fn a_filter_hides_selected_rows_from_local_commands() {
+    let mut app = app_with_rows(vec![row("a.txt", false), row("b.txt", false)]);
+    app.selected = HashSet::from([0, 1]);
+    app.search = "a".into();
+    app.order_dirty = true;
+    app.ensure_order();
+
+    assert_eq!(
+        app.selected_local_names(),
+        vec!["a.txt".to_string()],
+        "only the visible local row may reach cvs"
+    );
+    assert_eq!(app.hidden_selected_count(), 1);
+}
+
+#[test]
+fn a_hidden_selection_does_not_run_a_command() {
+    let mut app = app_with_rows(vec![row("a.txt", false), row("b.txt", false)]);
+    app.selected = HashSet::from([1]);
+    app.search = "a".into();
+    app.order_dirty = true;
+    app.ensure_order();
+
+    app.cvs_command(Cmd::Update);
+
+    assert!(app.rx.is_none(), "no cvs command should have started");
+    assert!(app.status.contains("hidden by"), "{}", app.status);
+}
+
+#[test]
+fn select_all_shown_selects_only_the_visible_rows() {
+    let mut app = app_with_rows(vec![row("a.txt", false), row("b.txt", false)]);
+    app.search = "a".into();
+    app.order_dirty = true;
+    app.ensure_order();
+
+    app.select_all_shown();
+
+    assert_eq!(app.selected, HashSet::from([0]));
+}
+
+#[test]
+fn a_filtered_empty_selection_does_not_open_commit() {
+    let mut app = app_with_rows(vec![row("a.txt", false)]);
+    app.search = "a".into();
+    app.order_dirty = true;
+    app.ensure_order();
+
+    app.open_commit_dialog(String::new());
+
+    assert!(app.dialog.is_none());
+    assert!(app.status.contains("Select files"), "{}", app.status);
+}
+
+#[test]
 fn a_new_server_listing_replaces_the_previous_server_rows() {
     let mut app = app_with_rows(vec![row("a.txt", false)]);
     app.apply_remote_listing(Listing {
@@ -774,6 +832,36 @@ fn a_new_server_listing_replaces_the_previous_server_rows() {
     assert_eq!(app.rows.len(), 2);
     assert_eq!(app.rows[1].name, "c.txt");
     assert!(!app.rows.iter().any(|row| row.name == "b.txt"));
+}
+
+#[test]
+fn a_listing_marks_the_remote_side_ready() {
+    let mut app = app_with_rows(vec![row("a.txt", false)]);
+    app.apply_remote_listing(Listing {
+        files: vec!["b.txt".to_string()],
+        dirs: Vec::new(),
+    });
+
+    assert_eq!(app.remote_state, RemoteState::Ready);
+    assert_eq!(app.scope_counts(), (1, 1));
+    assert_eq!(app.remote_status_label(), "1 not checked out");
+}
+
+#[test]
+fn an_unfinished_listing_never_reports_zero() {
+    let mut app = app_with_rows(vec![row("a.txt", false)]);
+    app.remote_state = RemoteState::Loading;
+    assert_eq!(app.remote_status_label(), "Checking server…");
+
+    app.remote_state = RemoteState::Failed;
+    assert_eq!(app.remote_status_label(), "Server list unavailable");
+}
+
+#[test]
+fn a_disabled_remote_listing_stays_off() {
+    let mut app = app_with_rows(vec![row("a.txt", false)]);
+    app.start_remote_listing();
+    assert_eq!(app.remote_state, RemoteState::Off);
 }
 
 #[test]
@@ -809,7 +897,7 @@ fn a_server_only_selection_does_not_run_a_local_command() {
     app.cvs_command(Cmd::Update);
 
     assert!(app.rx.is_none(), "no cvs command should have started");
-    assert!(app.status.contains("only on the server"), "{}", app.status);
+    assert!(app.status.contains("not checked out"), "{}", app.status);
 }
 
 #[test]
@@ -839,7 +927,7 @@ fn a_server_only_selection_does_not_open_a_commit_dialog() {
     app.open_commit_dialog(String::new());
 
     assert!(app.dialog.is_none());
-    assert!(app.status.contains("only on the server"), "{}", app.status);
+    assert!(app.status.contains("not checked out"), "{}", app.status);
 }
 
 #[test]
