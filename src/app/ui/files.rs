@@ -988,19 +988,23 @@ impl App {
                         } else {
                             REVISION_W
                         };
-                        put(
+                        let revision = truncate_columns(
                             if r.revision.is_empty() { "-" } else { &r.revision },
-                            left + g.revision_x,
-                            revision_w,
-                            color,
+                            (revision_w / cell) as usize,
                         );
+                        put(&revision, left + g.revision_x, revision_w, color);
                         if show_sticky {
+                            // The glyph follows the number itself, not the column edge.
+                            let revision_text_w = painter
+                                .layout_no_wrap(revision, body.clone(), color)
+                                .size()
+                                .x;
                             painter.text(
                                 egui::pos2(
-                                    left + g.revision_x + REVISION_W - STICKY_ICON_W / 2.0,
+                                    left + g.revision_x + revision_text_w + STICKY_ICON_GAP,
                                     rect.center().y,
                                 ),
-                                egui::Align2::CENTER_CENTER,
+                                egui::Align2::LEFT_CENTER,
                                 sticky_icon(&r.tag),
                                 fonts::icon_font(STICKY_ICON_SIZE),
                                 STICKY_COLOR,
