@@ -184,12 +184,22 @@ pub struct Hunk {
     pub last_row: usize,
 }
 
+/// The byte ranges that changed inside a replaced row. The ranges point into the
+/// row's own line text, so the view can paint them without splitting the line again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WordDiff {
+    pub left: Vec<std::ops::Range<usize>>,
+    pub right: Vec<std::ops::Range<usize>>,
+}
+
 /// Two complete files, paired line by line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffModel {
     pub left: FileText,
     pub right: FileText,
     pub rows: Vec<Row>,
+    /// One entry per row. Only a replaced row has word ranges.
+    pub words: Vec<Option<WordDiff>>,
     pub hunks: Vec<Hunk>,
     pub stats: Stats,
     pub notices: Vec<Notice>,
@@ -296,11 +306,13 @@ impl DiffModel {
         // but not every algorithm/version does. Pair the two runs here so the two
         // columns stay aligned even when the operations arrive separately.
         let rows = pair_replacements(rows);
+        let words = word_diffs(&rows);
         let hunks = group_hunks(&rows, options.context);
         Self {
             left,
             right,
             rows,
+            words,
             hunks,
             stats,
             notices,
@@ -312,6 +324,7 @@ impl DiffModel {
             left,
             right,
             rows: Vec::new(),
+            words: Vec::new(),
             hunks: Vec::new(),
             stats: Stats::default(),
             notices,
@@ -338,6 +351,75 @@ fn line_at(diff: &TextDiff<'_, '_, str>, old: bool, index: usize) -> Line {
         text: text.to_string(),
         terminated,
     }
+}
+
+/// Compute the changed character ranges for each replaced row. Inserted and
+/// deleted rows are already one block of change, so only paired lines need this.
+fn word_diffs(rows: &[Row]) -> Vec<Option<WordDiff>> {
+    rows.iter()
+        .map(|row| match row {
+            Row::Both {
+                left,
+                right,
+                kind: RowKind::Replace,
+            } => Some(word_diff(&left.text, &right.text)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn word_diff(left: &str, right: &str) -> WordDiff {
+    let diff = TextDiff::from_chars(left, right);
+    let mut left_ranges = Vec::new();
+    let mut right_ranges = Vec::new();
+    for op in diff.ops() {
+        if op.tag() == DiffTag::Equal {
+            continue;
+        }
+        let old = op.old_range();
+        let new = op.new_range();
+        if !old.is_empty() {
+            left_ranges.push(char_range_to_bytes(left, old));
+        }
+        if !new.is_empty() {
+            right_ranges.push(char_range_to_bytes(right, new));
+        }
+    }
+    WordDiff {
+        left: merge_ranges(left_ranges),
+        right: merge_ranges(right_ranges),
+    }
+}
+
+fn char_range_to_bytes(text: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let start = text
+        .char_indices()
+        .nth(range.start)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len());
+    let end = text
+        .char_indices()
+        .nth(range.end)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len());
+    start..end
+}
+
+fn merge_ranges(ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if range.start >= range.end {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
 }
 
 /// Turn adjacent delete and insert runs into paired replacement rows.
@@ -590,6 +672,65 @@ mod tests {
             Row::Right(line) => assert_eq!((line.no, line.text.as_str()), (3, "C")),
             other => panic!("expected the extra inserted line, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_replaced_line_marks_only_the_changed_words() {
+        let model = build(
+            "int main(void) { return 0; }\n",
+            "int main(void) { return 1; }\n",
+        );
+        let words = model.words[0]
+            .as_ref()
+            .expect("a replaced row has word ranges");
+        let (left, right) = match &model.rows[0] {
+            Row::Both { left, right, .. } => (left, right),
+            other => panic!("expected a replacement, got {other:?}"),
+        };
+        assert_eq!(words.left.len(), 1);
+        assert_eq!(words.right.len(), 1);
+        assert_eq!(&left.text[words.left[0].clone()], "0");
+        assert_eq!(&right.text[words.right[0].clone()], "1");
+    }
+
+    #[test]
+    fn word_ranges_keep_unicode_on_character_boundaries() {
+        let model = build("a中b\n", "a中文b\n");
+        let words = model.words[0]
+            .as_ref()
+            .expect("a replaced row has word ranges");
+        let (left, right) = match &model.rows[0] {
+            Row::Both { left, right, .. } => (left, right),
+            other => panic!("expected a replacement, got {other:?}"),
+        };
+        assert!(words.left.is_empty());
+        assert_eq!(&right.text[words.right[0].clone()], "文");
+        assert!(right.text.get(words.right[0].clone()).is_some());
+        assert!(left
+            .text
+            .get(words.left.first().cloned().unwrap_or(0..0))
+            .is_some());
+    }
+
+    #[test]
+    fn an_inserted_line_has_no_word_ranges() {
+        let model = build("a\n", "a\nb\n");
+        assert_eq!(model.words.len(), model.rows.len());
+        assert!(model.words[1].is_none());
+    }
+
+    #[test]
+    fn a_whitespace_only_change_still_has_a_word_range() {
+        let model = build("a b\n", "a  b\n");
+        let words = model.words[0]
+            .as_ref()
+            .expect("a replaced row has word ranges");
+        let (left, right) = match &model.rows[0] {
+            Row::Both { left, right, .. } => (left, right),
+            other => panic!("expected a replacement, got {other:?}"),
+        };
+        assert!(words.left.is_empty());
+        assert_eq!(&right.text[words.right[0].clone()], " ");
     }
 
     #[test]
