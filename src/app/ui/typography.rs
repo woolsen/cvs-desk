@@ -14,11 +14,13 @@ use egui::{FontFamily, FontId, TextStyle};
 pub const SMALL: f32 = 12.0;
 /// Running text: menus, file rows, dialogs and the status bar.
 pub const BODY: f32 = 13.0;
-/// The console and other fixed-pitch text (CVSROOT, settings paths).
+/// Fixed-pitch running text: the console, the other output panes and history messages.
 ///
-/// This must stay even: a Chinese letter is two Latin cells, and at an odd size the
-/// layout rounds each Latin cell up, so two cells no longer equal one Chinese letter.
-pub const MONO: f32 = 14.0;
+/// It sits level with `BODY` rather than a step above it; at 14 the console outgrew the
+/// file rows beside it. The face is the bundled JetBrains Mono, which keeps Latin cells
+/// uniform at any size; Chinese falls back to the UI font, so the old even-size rule no
+/// longer applies.
+pub const MONO: f32 = 13.0;
 /// Window titles. One step above body text: 18 (egui's own heading) shouted, and the
 /// compact frame reads better when the title stays close to the text under it.
 pub const HEADING: f32 = 14.0;
@@ -84,6 +86,14 @@ mod tests {
         assert!(
             HEADING < 18.0,
             "the title stays below egui's default heading, which looked oversized"
+        );
+    }
+
+    #[test]
+    fn the_console_sits_level_with_body_text() {
+        assert_eq!(
+            MONO, BODY,
+            "the console and the other fixed-pitch panes stay as compact as the file rows"
         );
     }
 
