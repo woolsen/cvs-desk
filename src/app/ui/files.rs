@@ -403,11 +403,11 @@ impl App {
         ];
 
         ui.painter().rect_filled(rect, 0.0, HEADER_BG);
-        // egui widens every click and hover target by 5 px, which would let a click on
-        // one heading land in its neighbour. The cells already fill their space, so hit
-        // test the pointer against the exact cell and keep the response for the tooltip.
+        // A click must land in the cell under the pointer, not in the neighbour egui's
+        // 5 px search radius offers, and a window drawn over the band must take the click
+        // itself. The exact cell test keeps the first rule; `Response::clicked` keeps the
+        // second, because egui only gives it to the widget in the topmost layer.
         let pointer = ui.input(|i| i.pointer.interact_pos());
-        let released = ui.input(|i| i.pointer.primary_clicked());
         let mut clicked = None;
         for h in &headings {
             let cell = egui::Rect::from_min_size(
@@ -448,7 +448,7 @@ impl App {
                     response.widget_info(|| {
                         egui::WidgetInfo::selected(egui::Role::Button, true, sorted, h.label)
                     });
-                    if released && exact_hover {
+                    if response.clicked() && exact_hover {
                         clicked = Some(key);
                     }
                 }
@@ -1186,14 +1186,18 @@ mod tests {
         ctx
     }
 
-    fn run_list(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> egui::FullOutput {
+    fn list_input(events: Vec<egui::Event>) -> egui::RawInput {
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(1000.0, 800.0),
         ));
         input.events = events;
-        test_run(ctx, input, |ui| {
+        input
+    }
+
+    fn run_list(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> egui::FullOutput {
+        test_run(ctx, list_input(events), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 app.ui_file_list(ui);
             });
@@ -1330,6 +1334,33 @@ mod tests {
             .collect()
     }
 
+    /// One frame of the list with a dialog laid over it, the way the File History window
+    /// sits on the file list. `closed` records a click on the dialog's own button, so a
+    /// test can tell a click that reached the dialog from one that never happened.
+    fn run_list_with_dialog(
+        ctx: &egui::Context,
+        app: &mut App,
+        events: Vec<egui::Event>,
+        pos: egui::Pos2,
+        closed: &mut bool,
+    ) -> egui::FullOutput {
+        test_run(ctx, list_input(events), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                app.ui_file_list(ui);
+            });
+            egui::Window::new("Graph")
+                .id(egui::Id::unique("graph_over_the_list"))
+                .fixed_pos(pos)
+                .resizable(false)
+                .collapsible(false)
+                .show(ui.ctx(), |ui| {
+                    if ui.button("Close").clicked() {
+                        *closed = true;
+                    }
+                });
+        })
+    }
+
     #[test]
     fn each_heading_starts_where_its_column_starts() {
         let ctx = list_ctx();
@@ -1439,6 +1470,74 @@ mod tests {
 
         assert_eq!(app.sort, SortKey::State);
         assert!(app.sort_asc);
+    }
+
+    #[test]
+    fn a_click_in_a_dialog_over_the_headings_does_not_sort_the_list() {
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![detailed_row("alpha.txt", "HEAD")]);
+        let mut closed = false;
+
+        // The dialog covers the heading band, as the File History window does. Its own
+        // button is lined up with the "State" heading, so a click that leaks through
+        // would sort the list by State.
+        let first = run_list(&ctx, &mut app, Vec::new());
+        let state = text_pos(&first, "State").expect("the heading is on screen");
+        let revision = text_pos(&first, "Revision").expect("the next heading is on screen");
+        let mut pos = state - egui::vec2(24.0, 8.0);
+        // The window fades in over its first frames, so measure it until its button shows.
+        let mut at = None;
+        for _ in 0..16 {
+            let frame = run_list_with_dialog(&ctx, &mut app, Vec::new(), pos, &mut closed);
+            let Some(close) = text_pos(&frame, "Close") else {
+                continue;
+            };
+            let delta = state - close;
+            if delta.x.abs() < 1.0 && delta.y.abs() < 1.0 {
+                at = Some(close + egui::vec2(5.0, 4.0));
+                break;
+            }
+            pos += delta;
+        }
+        let at = at.expect("the dialog is on screen with its Close button");
+        assert!(
+            at.x >= state.x && at.x < revision.x,
+            "the click must land on the State heading, not beside it: {at:?} vs {state:?}..{revision:?}"
+        );
+        assert!(
+            at.y >= state.y && at.y < state.y + typography::LIST_HEADER_H,
+            "the click must land on the heading band, not above or below it: {at:?} vs {state:?}"
+        );
+
+        run_list_with_dialog(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(at)],
+            pos,
+            &mut closed,
+        );
+        run_list_with_dialog(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(at), primary(at, true)],
+            pos,
+            &mut closed,
+        );
+        run_list_with_dialog(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(at), primary(at, false)],
+            pos,
+            &mut closed,
+        );
+
+        assert!(closed, "the click must reach the dialog's own button");
+        assert_eq!(
+            app.sort,
+            SortKey::Name,
+            "a click in the dialog must not sort the list underneath it"
+        );
+        assert!(app.sort_asc, "the sort direction must not change");
     }
 
     /// Right-click a row by its name and return the frame that has the menu on screen.
