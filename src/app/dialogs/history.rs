@@ -31,6 +31,9 @@ const DEAD: egui::Color32 = egui::Color32::from_rgb(0xA5, 0x0E, 0x0E);
 const ROW_H: f32 = 28.0;
 const GUTTER_LEFT: f32 = 14.0;
 const LANE_GAP: f32 = 15.0;
+/// How far a branch lane rounds off before it turns into the trunk. Four pixels take
+/// the hard edge off a 1 px line without eating the 15 px run between the lanes.
+const FORK_RADIUS: f32 = 4.0;
 const REV_W: f32 = 62.0;
 const DATE_W: f32 = 48.0;
 const PREVIEW_DELAY: Duration = Duration::from_millis(150);
@@ -985,6 +988,22 @@ fn lane_span(row: usize, start: usize, end: usize) -> Option<(bool, bool)> {
     Some((row != start, row != end))
 }
 
+/// The points of the quarter circle that turns a branch lane into the trunk. The arc
+/// starts `radius` above the fork node and ends `radius` left of it, so the straight
+/// lane and the fork line meet it with no kink.
+fn fork_arc(x: f32, y: f32, radius: f32) -> Vec<egui::Pos2> {
+    const STEPS: usize = 8;
+    (0..=STEPS)
+        .map(|step| {
+            let angle = step as f32 / STEPS as f32 * std::f32::consts::FRAC_PI_2;
+            egui::pos2(
+                x - radius + radius * angle.cos(),
+                y - radius + radius * angle.sin(),
+            )
+        })
+        .collect()
+}
+
 fn draw_lanes(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1011,19 +1030,36 @@ fn draw_lanes(
     }
     for &(branch_lane, start, end, has_fork) in branch_ranges {
         if let Some((from_top, to_bottom)) = lane_span(row, start, end) {
+            let lane_x = x(branch_lane);
+            // The fork row ends in a rounded turn into the trunk instead of a corner.
+            let turns = has_fork && row == end;
+            let lane_end = if to_bottom {
+                bottom
+            } else if turns {
+                middle - FORK_RADIUS
+            } else {
+                middle
+            };
             painter.line_segment(
                 [
-                    egui::pos2(x(branch_lane), if from_top { top } else { middle }),
-                    egui::pos2(x(branch_lane), if to_bottom { bottom } else { middle }),
+                    egui::pos2(lane_x, if from_top { top } else { middle }),
+                    egui::pos2(lane_x, lane_end),
                 ],
                 egui::Stroke::new(1.0_f32, BRANCH),
             );
-        }
-        if has_fork && row == end {
-            painter.line_segment(
-                [egui::pos2(x(0), middle), egui::pos2(x(branch_lane), middle)],
-                egui::Stroke::new(1.0_f32, BRANCH),
-            );
+            if turns {
+                painter.add(egui::Shape::line(
+                    fork_arc(lane_x, middle, FORK_RADIUS),
+                    egui::Stroke::new(1.0_f32, BRANCH),
+                ));
+                painter.line_segment(
+                    [
+                        egui::pos2(lane_x - FORK_RADIUS, middle),
+                        egui::pos2(x(0), middle),
+                    ],
+                    egui::Stroke::new(1.0_f32, BRANCH),
+                );
+            }
         }
     }
 
@@ -1587,6 +1623,20 @@ mod tests {
         assert_eq!(lane_span(4, 2, 3), None);
     }
 
+    #[test]
+    fn the_fork_arc_starts_and_ends_on_the_two_lanes() {
+        let arc = fork_arc(33.0, 42.0, FORK_RADIUS);
+        assert_eq!(arc.first().copied(), Some(egui::pos2(33.0, 38.0)));
+        assert_eq!(arc.last().copied(), Some(egui::pos2(29.0, 42.0)));
+        let centre = egui::pos2(29.0, 38.0);
+        for point in &arc {
+            assert!(
+                (point.distance(centre) - FORK_RADIUS).abs() < 0.001,
+                "{point:?} is not on the quarter circle"
+            );
+        }
+    }
+
     /// The vertical line segments of one colour, as (top, bottom) screen y values.
     fn verticals(output: &egui::FullOutput, color: egui::Color32) -> Vec<(f32, f32)> {
         fn walk(shape: &egui::Shape, color: egui::Color32, out: &mut Vec<(f32, f32)>) {
@@ -1646,8 +1696,8 @@ mod tests {
         let fork = rects[1].1;
         let branch_end = in_row(&green, fork).expect("the fork row has a green lane");
         assert!(
-            (branch_end.1 - fork.center().y).abs() < 0.5,
-            "the lane stops at the fork node: {branch_end:?} in {fork:?}"
+            (branch_end.1 - (fork.center().y - FORK_RADIUS)).abs() < 0.5,
+            "the lane stops where the rounded turn into the fork starts: {branch_end:?} in {fork:?}"
         );
 
         let next = rects[2].1;
