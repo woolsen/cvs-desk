@@ -115,7 +115,6 @@ pub(crate) struct DiffView {
     caret: Option<TextPos>,
     scroll_to: Option<usize>,
     cache: Option<Cache>,
-    highlight_words: bool,
 }
 
 impl Default for DiffView {
@@ -133,7 +132,6 @@ impl DiffView {
             caret: None,
             scroll_to: None,
             cache: None,
-            highlight_words: true,
         }
     }
 
@@ -252,7 +250,6 @@ impl DiffView {
                                 self.hscroll,
                                 selection,
                                 focused,
-                                self.highlight_words,
                                 text_color,
                             );
                         }
@@ -596,8 +593,6 @@ impl DiffView {
                         .color(GUTTER_TEXT),
                 );
             }
-
-            ui.checkbox(&mut self.highlight_words, "Words");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("Copy", |ui| {
@@ -1080,7 +1075,6 @@ fn paint_row(
     hscroll: f32,
     selection: Option<Selection>,
     focused: bool,
-    highlight_words: bool,
     text_color: Color32,
 ) {
     let row = &model.rows[index];
@@ -1122,16 +1116,8 @@ fn paint_row(
 
     let (left_line, right_line) = row_lines(row);
     let words: Option<&WordDiff> = model.words.get(index).and_then(Option::as_ref);
-    let left_words: &[Range<usize>] = if highlight_words {
-        words.map(|words| words.left.as_slice()).unwrap_or(&[])
-    } else {
-        &[]
-    };
-    let right_words: &[Range<usize>] = if highlight_words {
-        words.map(|words| words.right.as_slice()).unwrap_or(&[])
-    } else {
-        &[]
-    };
+    let left_words = words.map(|words| words.left.as_slice()).unwrap_or(&[]);
+    let right_words = words.map(|words| words.right.as_slice()).unwrap_or(&[]);
     let left_selection =
         selection.and_then(|selection| selection_range(model, selection, Side::Left, index));
     let right_selection =
