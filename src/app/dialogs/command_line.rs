@@ -1,6 +1,6 @@
 //! Command Line: one cvs command typed as it would be at the console.
 
-use cvsdesk::cvs::{self, Cmd, CommandRequest};
+use cvsdesk::cvs::{self, CommandRequest};
 
 use super::{Dialog, DialogAction};
 use crate::app::ui::{typography, wrap};
@@ -50,51 +50,56 @@ pub(super) fn apply(app: &mut App, d: Dialog) {
     let Dialog::CommandLine { text } = d else {
         return;
     };
-    let raw = text.trim().to_string();
-    let cmd = raw
-        .strip_prefix("cvs ")
-        .or_else(|| raw.strip_prefix("cvs.exe "))
-        .unwrap_or(&raw)
-        .to_string();
-    let mut req = CommandRequest::new(Cmd::Status);
-    // The whole line is passed through as-is after the program name.
-    let parts = cvs::split_args(&cmd).unwrap_or_default();
-    if let Some(first) = parts.first() {
-        // A typed line may name a command this window does not know, which can still
-        // write to the working copy, so the list is read again afterwards. The words
-        // below are the queries: they only read the repository and the folder.
-        req.refresh = !matches!(
-            first.as_str(),
-            "log"
-                | "status"
-                | "diff"
-                | "annotate"
-                | "editors"
-                | "watchers"
-                | "history"
-                | "rdiff"
-                | "rtag"
-                | "admin"
-                | "login"
-                | "logout"
-        );
-        req.cmd = match first.as_str() {
-            "update" => Cmd::Update,
-            "commit" => Cmd::Commit,
-            "add" => Cmd::Add,
-            "remove" => Cmd::Remove,
-            "diff" => Cmd::Diff,
-            "log" => Cmd::Log,
-            "tag" => Cmd::Tag,
-            "rtag" => Cmd::Rtag,
-            "checkout" => Cmd::Checkout,
-            "import" => Cmd::Import,
-            "init" => Cmd::Init,
-            _ => Cmd::Status,
-        };
-        req.extra = parts.iter().skip(1).cloned().collect();
+    let parts = words(&text);
+    if parts.is_empty() {
+        app.status = "Enter a cvs command".into();
+        return;
     }
+    // The whole line goes to the project's own client as typed. The window does not
+    // need to know every command: the engine reports an unknown one itself.
+    let refresh = !parts.first().is_some_and(|first| reads_only(first));
+    let mut req = CommandRequest::raw(parts);
+    req.refresh = refresh;
     app.start(req, OutputKind::Console);
+}
+
+/// Commands that only read the repository or the folder, so the file list does not need
+/// to be read again after them.
+fn reads_only(command: &str) -> bool {
+    matches!(
+        command,
+        "log"
+            | "rlog"
+            | "status"
+            | "diff"
+            | "rdiff"
+            | "annotate"
+            | "rannotate"
+            | "editors"
+            | "watchers"
+            | "history"
+            | "rtag"
+            | "admin"
+            | "login"
+            | "logout"
+            | "version"
+            | "noop"
+    )
+}
+
+/// The words after a typed `cvs` or `cvs.exe` program name. A quoted argument stays
+/// one word, the same way the client's own parser reads it.
+fn words(text: &str) -> Vec<String> {
+    let text = text.trim();
+    let command = ["cvs.exe", "cvs"]
+        .iter()
+        .find_map(|program| {
+            let rest = text.strip_prefix(program)?;
+            let separated = rest.chars().next().is_none_or(|c| c.is_whitespace());
+            separated.then(|| rest.trim_start())
+        })
+        .unwrap_or(text);
+    cvs::split_args(command).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -115,5 +120,78 @@ mod tests {
             app.runner.lines.first().map(String::as_str),
             Some("$ cvs -q -z9 rtag T1 mod")
         );
+    }
+
+    /// The dialog hands the words to the project's own client as typed. Commands the
+    /// window has no menu item for (`admin`, `rlog`, ...) must reach the engine too,
+    /// instead of being rewritten into `status`.
+    #[test]
+    fn a_typed_line_reaches_the_engine_as_typed() {
+        for (text, expected) in [
+            ("cvs admin -kb a.txt", "$ cvs -q -z9 admin -kb a.txt"),
+            ("cvs watch on a.txt", "$ cvs -q -z9 watch on a.txt"),
+            ("cvs rlog mod", "$ cvs -q -z9 rlog mod"),
+            ("cvs frobnicate", "$ cvs -q -z9 frobnicate"),
+        ] {
+            let mut app = app_with_rows(Vec::new());
+            app.dialog = Some(Dialog::CommandLine {
+                text: text.to_string(),
+            });
+
+            apply(
+                &mut app,
+                Dialog::CommandLine {
+                    text: text.to_string(),
+                },
+            );
+
+            assert_eq!(
+                app.runner.lines.first().map(String::as_str),
+                Some(expected),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_program_name_and_quoted_words_are_read_like_the_client_reads_them() {
+        for (text, expected) in [
+            ("cvs.exe log a.txt", "$ cvs -q -z9 log a.txt"),
+            ("cvs\tstatus", "$ cvs -q -z9 status"),
+            (
+                "cvs commit -m \"first drop\"",
+                "$ cvs -q -z9 commit -m \"first drop\"",
+            ),
+        ] {
+            let mut app = app_with_rows(Vec::new());
+            app.dialog = Some(Dialog::CommandLine {
+                text: text.to_string(),
+            });
+
+            apply(
+                &mut app,
+                Dialog::CommandLine {
+                    text: text.to_string(),
+                },
+            );
+
+            assert_eq!(
+                app.runner.lines.first().map(String::as_str),
+                Some(expected),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_line_does_not_start_a_command() {
+        let mut app = app_with_rows(Vec::new());
+        let text = "   ".to_string();
+        app.dialog = Some(Dialog::CommandLine { text: text.clone() });
+
+        apply(&mut app, Dialog::CommandLine { text });
+
+        assert!(app.runner.lines.is_empty());
+        assert!(!app.runner.running);
     }
 }

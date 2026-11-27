@@ -53,8 +53,8 @@ embed-resource = "3"
 name = "cvsdesk"
 path = "src/main.rs"
 
-# The command-line CVS client this project builds. It is a second program, not part of the
-# window: the desktop program runs it, and so can anyone who puts it on PATH.
+# The command-line CVS client this project builds. It links the same client library the
+# window uses; the desktop program does not start this file.
 [[bin]]
 name = "cvs"
 path = "src/bin/cvs/main.rs"

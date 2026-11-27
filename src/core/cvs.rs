@@ -163,15 +163,29 @@ pub struct CommandRequest {
     /// on the command line. `None` closes its input.
     pub password: Option<String>,
     /// Read the folder again when the command ends even though its first word names a
-    /// command that normally only reads. The Command Line dialog sets it for a line this
-    /// window does not know, which may still write to the working copy.
+    /// command that normally only reads. The Command Line dialog sets it for a line that
+    /// may write to the working copy.
     pub refresh: bool,
+    /// The words after the program name when the caller typed a whole command line
+    /// (the Command Line dialog). `Some` makes [`Self::to_args`] use them as they are,
+    /// so every command the client implements is reachable, not only the ones the
+    /// window has a dialog for.
+    pub raw_args: Option<Vec<String>>,
 }
 
 impl CommandRequest {
     pub fn new(cmd: Cmd) -> Self {
         Self {
             cmd,
+            ..Default::default()
+        }
+    }
+
+    /// A whole command line typed by the user: the words after the program name, sent to
+    /// the client exactly as typed. The structured fields (`cmd`, `files`, ...) stay empty.
+    pub fn raw(args: Vec<String>) -> Self {
+        Self {
+            raw_args: Some(args),
             ..Default::default()
         }
     }
@@ -185,6 +199,10 @@ impl CommandRequest {
             args.push(root.trim().to_string());
         }
         args.extend(globals.iter().cloned());
+        if let Some(raw) = &self.raw_args {
+            args.extend(raw.iter().cloned());
+            return args;
+        }
         args.push(self.cmd.name().to_string());
 
         // `-P` is an update/checkout switch. Putting it in the global options made a
@@ -522,6 +540,26 @@ mod tests {
                 "-q",
                 "-z9",
                 "watchers",
+                "a.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_words_come_after_the_root_and_the_global_switches() {
+        let req = CommandRequest::raw(vec![
+            "admin".to_string(),
+            "-kb".to_string(),
+            "a.txt".to_string(),
+        ]);
+        assert_eq!(
+            req.to_args(":pserver:user@host:/repo", &["-q".to_string()]),
+            vec![
+                "-d",
+                ":pserver:user@host:/repo",
+                "-q",
+                "admin",
+                "-kb",
                 "a.txt"
             ]
         );
