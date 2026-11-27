@@ -346,9 +346,6 @@ impl App {
                                 .color(egui::Color32::from_rgb(180, 80, 0)),
                         );
                     }
-                    if let Some(kind) = self.folder_kind() {
-                        ui.label(egui::RichText::new(kind).weak());
-                    }
                 });
             });
         });

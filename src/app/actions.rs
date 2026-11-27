@@ -13,7 +13,7 @@ use cvsdesk::history::History;
 use crate::app::dialogs::history::HistoryState;
 use crate::app::dialogs::tags::TagsState;
 use crate::app::dialogs::Dialog;
-use crate::app::{App, HistoryWait, OutputKind, TagWait, Trouble};
+use crate::app::{App, HistoryWait, OutputKind, TagWait};
 
 impl App {
     // -- running commands ---------------------------------------------------
@@ -31,10 +31,8 @@ impl App {
                 .lines
                 .push("Error : cvs is already running !".into());
             self.output = OutputKind::Console;
-            self.trouble = Some(Trouble::Busy);
             return false;
         }
-        self.trouble = None;
         self.stop_requested = false;
         self.history_waiting = None;
         self.checkout_waiting = None;
@@ -68,8 +66,8 @@ impl App {
         req.root.clone().unwrap_or_else(|| self.root.clone())
     }
 
-    /// The connection kind named by the folder's own root, for the About window and the
-    /// right side of the menu bar. `None` means the folder is not a working copy.
+    /// The connection kind named by the folder's own root, for the About window.
+    /// `None` means the folder is not a working copy.
     pub(super) fn folder_kind(&self) -> Option<&'static str> {
         if self.root.trim().is_empty() {
             None
@@ -195,7 +193,6 @@ impl App {
                 .lines
                 .push("Error : cvs is already running !".into());
             self.output = OutputKind::Console;
-            self.trouble = Some(Trouble::Busy);
             return;
         }
         let mut req = CommandRequest::new(Cmd::Log);
@@ -355,12 +352,10 @@ impl App {
                     if self.stop_requested {
                         self.stop_requested = false;
                         self.runner.lines.push("Stopped.".into());
-                        self.trouble = None;
                     } else if code != 0 {
                         self.runner
                             .lines
                             .push(format!("cvs returned an non-zero error code ({})", code));
-                        self.trouble = Some(Trouble::Exit(code));
                     }
                     self.runner.finish(code);
                 }

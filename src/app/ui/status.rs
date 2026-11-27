@@ -1,6 +1,6 @@
-//! The status bar: the last command, the counts and the last trouble.
+//! The status bar: the counts and the working copy's root.
 
-use crate::app::{App, RemoteState, Trouble};
+use crate::app::{App, RemoteState};
 
 use super::state_color;
 
@@ -63,21 +63,6 @@ impl App {
                     .on_hover_text("Hidden by the current view, the Show menu or the scope bar.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(t) = &self.trouble {
-                        let colour = match t {
-                            Trouble::Busy => egui::Color32::from_rgb(190, 120, 0),
-                            Trouble::Exit(_) | Trouble::Message(_) => {
-                                egui::Color32::from_rgb(190, 60, 60)
-                            }
-                        };
-                        let text = t.text();
-                        let label = ui.label(egui::RichText::new(&text).color(colour));
-                        if ui.small_button("×").on_hover_text("Dismiss").clicked() {
-                            self.trouble = None;
-                        }
-                        label.on_hover_text("This is also written into the console.");
-                    }
-                    ui.label(egui::RichText::new(&self.status).weak());
                     if !self.root.is_empty() {
                         ui.add(egui::Label::new(egui::RichText::new(&self.root).weak()).truncate())
                             .on_hover_text(&self.root);

@@ -5,7 +5,7 @@ use cvsdesk::prefs::Prefs;
 use super::{Dialog, DialogAction};
 use crate::app::ui::typography::small_monospace;
 use crate::app::ui::wrap;
-use crate::app::{App, Trouble};
+use crate::app::App;
 
 pub(super) fn show(
     ctx: &egui::Context,
@@ -150,13 +150,14 @@ pub(super) fn apply(app: &mut App, d: Dialog) {
     // keep the list's current view instead of restoring the draft's older one.
     app.sync_view_prefs();
     // Write them out beside the program, so the tag lists and the CVSROOT survive a restart.
+    // The status bar shows only the working copy's root, so a failure also goes into the
+    // console.
     app.status = match app.prefs.save() {
-        Ok(_) => {
-            app.trouble = None;
-            "Preferences saved".into()
-        }
+        Ok(_) => "Preferences saved".into(),
         Err(e) => {
-            app.trouble = Some(Trouble::Message(format!("settings: {}", e)));
+            app.runner
+                .lines
+                .push(format!("Could not save the settings: {}", e));
             "Preferences kept for this session only".into()
         }
     };

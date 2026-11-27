@@ -88,29 +88,6 @@ pub(super) struct HistoryWait {
     pub refresh: bool,
 }
 
-/// Something that stopped a command, kept so the status bar can show it.
-#[derive(Clone, PartialEq)]
-enum Trouble {
-    /// A command was asked for while one was already running.
-    Busy,
-    /// cvs exited with a code other than zero.
-    Exit(i32),
-    /// Something outside a cvs command failed, such as writing the settings file.
-    Message(String),
-}
-
-impl Trouble {
-    fn text(&self) -> String {
-        match self {
-            Trouble::Busy => "Error : cvs is already running !".to_string(),
-            Trouble::Exit(code) => {
-                format!("cvs returned an non-zero error code ({})", code)
-            }
-            Trouble::Message(text) => text.clone(),
-        }
-    }
-}
-
 pub(crate) struct App {
     dir: PathBuf,
     /// What the address bar shows. Kept in step with `dir`, and editable by the user.
@@ -223,9 +200,6 @@ pub(crate) struct App {
     prefs: Prefs,
     dialog: Option<Dialog>,
     status: String,
-    /// The last thing that went wrong, shown in the status bar until the next command.
-    /// The console reports these; this also keeps the last one in view.
-    trouble: Option<Trouble>,
     /// Set when the user stops a running command, so its killed exit code is not
     /// reported as an error.
     stop_requested: bool,
@@ -322,7 +296,6 @@ impl App {
             prefs,
             dialog: None,
             status: String::new(),
-            trouble: None,
             stop_requested: false,
             state_sheet: String::new(),
             shot: shot.map(|p| ShotJob {

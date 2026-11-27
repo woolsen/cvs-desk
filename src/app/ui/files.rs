@@ -1017,10 +1017,6 @@ impl App {
                     self.selected = HashSet::from([idx]);
                     self.anchor = Some(idx);
                 }
-                if let Some(r) = self.rows.get(idx) {
-                    self.status =
-                        format!("{} — {}", display_name(&r.name, r.is_dir), r.state.label());
-                }
             }
         }
         if let Some((action, index)) = menu_action {
@@ -1032,9 +1028,6 @@ impl App {
                 click_selection(&self.order, &self.selected, self.anchor, pos, ctrl, shift);
             self.selected = selection;
             self.anchor = anchor;
-            if let Some(r) = self.order.get(pos).and_then(|&i| self.rows.get(i)) {
-                self.status = format!("{} — {}", display_name(&r.name, r.is_dir), r.state.label());
-            }
         }
         if let Some(name) = open_missing_dir {
             self.ensure_and_open_dir(name);

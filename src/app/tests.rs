@@ -15,7 +15,7 @@ use cvsdesk::tags::TagInfo;
 use super::dialogs::tags::TagsState;
 use super::dialogs::Dialog;
 use super::files::{Filters, SortKey};
-use super::{App, HistoryWait, OutputKind, RemoteState, TagWait, Trouble};
+use super::{App, HistoryWait, OutputKind, RemoteState, TagWait};
 
 pub(super) fn row(name: &str, is_dir: bool) -> Row {
     Row {
@@ -94,7 +94,6 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         prefs: Prefs::default(),
         dialog: None,
         status: String::new(),
-        trouble: None,
         stop_requested: false,
         state_sheet: String::new(),
         shot: None,
@@ -191,37 +190,20 @@ fn a_request_root_wins_over_the_folder_root() {
 }
 
 #[test]
-fn trouble_uses_the_expected_wording() {
-    assert_eq!(
-        Trouble::Busy.text(),
-        "Error : cvs is already running !".to_string()
-    );
-    assert_eq!(
-        Trouble::Exit(1).text(),
-        "cvs returned an non-zero error code (1)".to_string()
-    );
-    assert_eq!(Trouble::Message("settings".into()).text(), "settings");
-}
-
-#[test]
 fn a_requested_stop_is_not_an_error() {
     // The rule: when the user asked to stop, the killed process's exit code (which is
     // never 0) must be reported as "Stopped.", not as an error.
     let mut stop_requested = true;
-    let mut trouble: Option<Trouble> = None;
     let mut lines: Vec<String> = Vec::new();
     let code = 1;
     if stop_requested {
         stop_requested = false;
         lines.push("Stopped.".into());
-        trouble = None;
     } else if code != 0 {
         lines.push(format!("cvs returned an non-zero error code ({})", code));
-        trouble = Some(Trouble::Exit(code));
     }
-    assert!(stop_requested == false);
+    assert!(!stop_requested);
     assert_eq!(lines, vec!["Stopped.".to_string()]);
-    assert!(trouble.is_none(), "a deliberate stop raises no banner");
 }
 
 #[test]
@@ -669,7 +651,11 @@ fn a_command_runs_in_the_window_process() {
         "the command produced no output: {:?}",
         app.runner.lines
     );
-    assert!(matches!(app.trouble, Some(Trouble::Exit(1))));
+    assert!(app
+        .runner
+        .lines
+        .iter()
+        .any(|line| line == "cvs returned an non-zero error code (1)"));
     let _ = fs::remove_dir_all(&dir);
 }
 
