@@ -54,6 +54,8 @@ Verify the release page, download the zip, and compare its SHA-256 with
 
 `.github/about.toml` lists the licenses the project accepts and pins the one license text that
 cargo-about cannot find by itself (the Ubuntu font licence inside `epaint_default_fonts`).
+The packaging step also appends the SIL OFL text for the bundled JetBrains Mono
+(`assets/fonts/OFL.txt`); the font is not a crate, so cargo-about does not see it.
 `.github/about.hbs` is the template for the generated text. Because cargo-about only
 auto-discovers an `about.toml` at the repository root, the release workflow passes
 `--config .github/about.toml` explicitly. It puts `third-party-licenses.txt` in the zip.

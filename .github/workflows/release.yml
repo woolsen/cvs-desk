@@ -56,11 +56,23 @@ jobs:
       - name: Generate license notices
         run: cargo about generate --locked --config .github/about.toml --output-file third-party-licenses.txt .github/about.hbs
 
+      - name: Add the bundled font licence
+        shell: pwsh
+        run: |
+          Add-Content third-party-licenses.txt @"
+
+--------------------------------------------------------------------------------
+JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf)
+--------------------------------------------------------------------------------
+
+"@
+          Add-Content third-party-licenses.txt (Get-Content assets/fonts/OFL.txt -Raw)
+
       - name: Check the license notices
         shell: pwsh
         run: |
           $text = Get-Content third-party-licenses.txt -Raw
-          foreach ($license in @("GNU AFFERO GENERAL PUBLIC LICENSE", "UBUNTU FONT LICENCE")) {
+          foreach ($license in @("GNU AFFERO GENERAL PUBLIC LICENSE", "UBUNTU FONT LICENCE", "JetBrains Mono")) {
             if (-not $text.Contains($license)) {
               throw "third-party-licenses.txt is missing: $license"
             }

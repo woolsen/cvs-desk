@@ -99,7 +99,8 @@ CVS Desk is licensed under the GNU Affero General Public License, version 3 only
 
 Third-party dependencies are listed in `Cargo.lock`; they are mostly MIT or Apache-2.0, with
 `encoding_rs` also under BSD-3-Clause. The file-type icons come from Remix Icon
-(Apache-2.0). Each component keeps its own license.
+(Apache-2.0), and fixed-pitch text is set in JetBrains Mono (SIL OFL 1.1). Each component
+keeps its own license.
 
 Commercial licensing for terms other than AGPL-3.0, and commercial support, are available
 separately: `woolsen@qq.com`.

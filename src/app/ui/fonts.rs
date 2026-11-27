@@ -1,8 +1,9 @@
 //! Which fonts the window draws with.
 //!
-//! The program never names a typeface of its own: each platform is asked the same
-//! question a native program asks — "what is your default UI font?" — and the answer
-//! is handed to egui. If a platform cannot answer, egui's bundled fonts stay in use.
+//! The UI face comes from the platform, asked the same question a native program asks:
+//! "what is your default UI font?". Fixed-pitch text is drawn in a bundled JetBrains
+//! Mono, so the console and every path look the same on every machine; Chinese still
+//! comes from the platform's UI fallback.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -166,16 +167,33 @@ fn resolve() -> Option<Plan> {
     platform::resolve()
 }
 
-/// The family name of the browser's file-type icon font.
+/// The family the browser uses for its type icons.
 pub const ICON_FAMILY: &str = "remixicon";
+
+/// The family the console, diffs and paths are drawn in.
+const APP_MONO: &str = "app-mono";
+
+/// JetBrains Mono Regular (SIL OFL 1.1), embedded so fixed-pitch text does not depend on
+/// what the machine has installed. Chinese falls back to the platform's UI font.
+const JETBRAINS_MONO: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/fonts/JetBrainsMono-Regular.ttf"
+));
 
 /// The font the browser uses for its type icons, independent of the text fallback chain.
 pub fn icon_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(ICON_FAMILY.into()))
 }
 
-/// Hands the resolved system fonts to egui; leaves its bundled fonts alone on failure.
+/// Hands the window its fonts: the platform's UI face and the bundled mono.
 pub fn install(ctx: &egui::Context) {
+    ctx.set_fonts(definitions(resolve()));
+}
+
+/// The font set egui draws with. `plan` is what the platform answered; the bundled mono
+/// is always the head of the fixed-pitch family, so fixed-pitch text works even when no
+/// platform font resolves.
+fn definitions(plan: Option<Plan>) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
 
     // The type icons travel with the program as one font file: no image drawer to ship, and
@@ -189,13 +207,33 @@ pub fn install(ctx: &egui::Context) {
         vec![ICON_FAMILY.to_owned()],
     );
 
-    let Some(plan) = resolve() else {
-        ctx.set_fonts(fonts);
-        return;
+    fonts.font_data.insert(
+        APP_MONO.to_owned(),
+        Arc::new(egui::FontData::from_static(JETBRAINS_MONO)),
+    );
+
+    // egui 0.37 ships its symbol faces only when the matching feature is enabled
+    // (`egui-icons` is always there; the two emoji faces need `monochrome_emoji_fonts`).
+    // Add whichever ones this build has, so a family list never names a missing font.
+    let fallbacks: Vec<String> = ["egui-icons", "NotoEmoji-Regular", "emoji-icon-font"]
+        .into_iter()
+        .filter(|name| fonts.font_data.contains_key(*name))
+        .map(str::to_owned)
+        .collect();
+
+    let Some(plan) = plan else {
+        // No platform font: the bundled mono and egui's own proportional face remain.
+        let mut monospace = vec![APP_MONO.to_owned()];
+        monospace.extend(fallbacks);
+        fonts
+            .families
+            .insert(egui::FontFamily::Monospace, monospace);
+        return fonts;
     };
+
     let ui_has_cjk = plan.ui.has_cjk;
     let cjk_fallback = plan.cjk.is_some();
-    let mono_font = plan.mono.is_some();
+    let mono_fallback = plan.mono.is_some();
 
     fonts
         .font_data
@@ -211,15 +249,6 @@ pub fn install(ctx: &egui::Context) {
             .insert("system-mono".to_owned(), font_data(mono));
     }
 
-    // egui 0.37 ships its symbol faces only when the matching feature is enabled
-    // (`egui-icons` is always there; the two emoji faces need `monochrome_emoji_fonts`).
-    // Add whichever ones this build has, so a family list never names a missing font.
-    let fallbacks: Vec<String> = ["egui-icons", "NotoEmoji-Regular", "emoji-icon-font"]
-        .into_iter()
-        .filter(|name| fonts.font_data.contains_key(*name))
-        .map(str::to_owned)
-        .collect();
-
     // The UI font first; the system's own Chinese fallback next. egui's symbol fonts stay
     // last, for glyphs no text font carries.
     let mut proportional = vec!["system-ui".to_owned()];
@@ -228,16 +257,16 @@ pub fn install(ctx: &egui::Context) {
     }
     proportional.extend(fallbacks.iter().cloned());
 
-    let mut monospace = vec![if mono_font {
-        "system-mono"
-    } else {
-        "system-ui"
-    }
-    .to_owned()];
+    // JetBrains Mono carries Latin and symbols; Chinese comes from the system UI face, and
+    // the system mono is only a backstop for glyphs neither has.
+    let mut monospace = vec![APP_MONO.to_owned()];
     if cjk_fallback {
         monospace.push("system-cjk".to_owned());
-    } else if ui_has_cjk && mono_font {
+    } else if ui_has_cjk {
         monospace.push("system-ui".to_owned());
+    }
+    if mono_fallback {
+        monospace.push("system-mono".to_owned());
     }
     monospace.extend(fallbacks);
 
@@ -247,24 +276,24 @@ pub fn install(ctx: &egui::Context) {
     fonts
         .families
         .insert(egui::FontFamily::Monospace, monospace);
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 /// What `--font-info` prints: which system faces were found, and where.
 pub fn report() -> Vec<String> {
+    let mut lines = vec!["mono         JetBrains Mono (bundled, regular)".to_string()];
     let Some(plan) = resolve() else {
-        return vec![
-            "fonts: the platform gave no default font; egui's bundled fonts are used".to_string(),
-        ];
+        lines.push("fonts: the platform gave no default font; bundled fonts are used".to_string());
+        return lines;
     };
-    let mut lines = vec![describe("ui", &plan.ui)];
+    lines.push(describe("ui", &plan.ui));
     lines.push(match &plan.cjk {
         Some(cjk) => describe("cjk fallback", cjk),
         None => "cjk fallback: none".to_string(),
     });
     lines.push(match &plan.mono {
-        Some(mono) => describe("mono", mono),
-        None => "mono: none".to_string(),
+        Some(mono) => describe("system mono", mono),
+        None => "system mono: none".to_string(),
     });
     lines
 }
@@ -329,18 +358,17 @@ mod platform {
             link_fallback(&family)
         };
 
-        // The console needs a dual-width face, not merely a monospaced one: Consolas plus a
-        // proportional Chinese fallback would set Chinese at 1.8 cells and drift. The fonts
-        // the Windows console itself uses for Chinese are dual-width, so prefer them and keep
-        // Consolas for machines without one.
+        // The system mono is only a backstop now: the bundled JetBrains Mono draws Latin
+        // and symbols, and the UI fallback above draws Chinese. This face fills glyphs
+        // neither has, so Windows' console fonts for Chinese are still the first choice.
         let mono = console_face().or_else(|| load_family("Consolas", None));
 
         Some(Plan { ui, cjk, mono })
     }
 
-    /// The face the console should draw with: a Chinese console font whose Latin cells are
-    /// exactly half a Chinese cell. SimHei (a sans, like the rest of the window) is tried
-    /// before the two Song faces, then any other installed face is left to Consolas.
+    /// The system face kept for glyphs neither the bundled mono nor the UI fallback has.
+    /// SimHei (a sans, like the rest of the window) is tried before the two Song faces,
+    /// then Consolas covers machines without a Chinese console face.
     fn console_face() -> Option<Loaded> {
         for family in ["SimHei", "NSimSun", "SimSun"] {
             if let Some(loaded) = load_family(family, None) {
@@ -772,32 +800,36 @@ mod tests {
         );
     }
 
-    /// A console is a character grid: a Chinese letter has to take exactly the room of two
-    /// Latin ones, or every column after it drifts and the rows stop lining up. Measured on
-    /// the laid-out text, not on the face, so a wrong fallback chain is caught too.
+    /// The window must draw fixed-pitch text in the face that travels with it, not in
+    /// whatever mono the machine happens to have.
+    #[test]
+    fn the_console_starts_with_the_bundled_mono() {
+        let fonts = definitions(None);
+        assert_eq!(
+            fonts.families[&egui::FontFamily::Monospace][0],
+            APP_MONO,
+            "the bundled mono is the head of the fixed-pitch family"
+        );
+        let data = fonts
+            .font_data
+            .get(APP_MONO)
+            .expect("the bundled mono is installed");
+        assert_eq!(data.font.as_ref().as_ref().len(), JETBRAINS_MONO.len());
+    }
+
+    /// Dropping the dual-width grid means Chinese may come from the UI fallback, but the
+    /// console must still be able to draw it.
     #[cfg(windows)]
     #[test]
-    fn a_chinese_letter_takes_two_monospace_cells() {
+    fn chinese_is_still_drawable_in_the_console() {
         let ctx = egui::Context::default();
         install(&ctx);
         // The font atlas is built for the first frame, so ask for one before measuring.
         let _ = test_run(&ctx, egui::RawInput::default(), |_| {});
-        // The actual console size: a Chinese letter must still take exactly two cells
-        // after the type scale was raised, or every column after it drifts.
         let font = egui::FontId::monospace(super::super::typography::MONO);
-        let width = |text: &str| {
-            ctx.fonts_mut(|fonts| {
-                fonts
-                    .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::BLACK)
-                    .size()
-                    .x
-            })
-        };
-        let latin = width("WW");
-        let chinese = width("中");
         assert!(
-            (chinese - latin).abs() < 0.01,
-            "a Chinese letter is {chinese} wide but two Latin cells are {latin}: the grid drifts"
+            ctx.fonts_mut(|fonts| fonts.has_glyphs(&font, "中")),
+            "the console family needs a Chinese fallback"
         );
     }
 
