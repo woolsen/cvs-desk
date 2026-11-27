@@ -1,8 +1,9 @@
 //! The File History window: one file's revisions, tags and diffs.
 //!
 //! The left side is the revision list with its branch gutter, the right side is the
-//! selected revision, and the bottom is its diff. Selecting a row loads the diff through
-//! a separate preview worker, so the main cvs command slot stays free.
+//! selected revision. The diff opens as a floating window from the details' Diff button,
+//! and selecting a row reloads it through a separate preview worker, so the main cvs
+//! command slot stays free.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -55,6 +56,10 @@ pub(crate) struct HistoryState {
     raw: Vec<String>,
     selected: Option<usize>,
     filter: String,
+    /// The lowercased text each revision is searched by, built once per log refresh.
+    haystacks: Vec<String>,
+    /// Whether the detail panel shows every tag of the selected revision.
+    tags_expanded: bool,
     branch_filter: BranchFilter,
     diff_target: Target,
     diff_open: bool,
@@ -74,6 +79,65 @@ pub(crate) struct HistoryState {
     error: String,
 }
 
+/// The one tag shown for a revision, and how many more it has.
+///
+/// The tags are sorted by name and `cvs log` records no tag time, so the last name is
+/// the newest-looking one.
+fn shown_tag(tags: &[String]) -> Option<(&str, usize)> {
+    tags.last().map(|tag| (tag.as_str(), tags.len() - 1))
+}
+
+/// The lowercased text of every revision, built once when a log is loaded.
+fn search_texts(history: &History) -> Vec<String> {
+    history
+        .revisions
+        .iter()
+        .map(|node| {
+            let mut text = format!(
+                "{} {} {} {} {} {}",
+                node.revision,
+                node.message,
+                node.author,
+                node.date_time,
+                node.state,
+                node.tags.join(" ")
+            );
+            if node.branch {
+                if let Some(id) = graph::branch_id(&node.revision) {
+                    if let Some(label) = history.branch_label(&id) {
+                        text.push(' ');
+                        text.push_str(label);
+                    }
+                }
+            }
+            text.to_lowercase()
+        })
+        .collect()
+}
+
+/// One line of message text, cut at `max_width` pixels with an ellipsis.
+///
+/// The column estimate the list used before assumed every letter took half the font
+/// size, which is wrong for Chinese: a wide letter takes a whole em and ran over the
+/// author and date columns. egui lays the row out at the real pixel width instead.
+fn message_job(text: &str, font: egui::FontId, max_width: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color: MESSAGE,
+            ..Default::default()
+        },
+    );
+    job.wrap.max_width = max_width;
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    job
+}
+
 impl HistoryState {
     pub(crate) fn new(
         dir: std::path::PathBuf,
@@ -85,6 +149,7 @@ impl HistoryState {
         raw: Vec<String>,
     ) -> Self {
         let selected = history.working_index(&working);
+        let haystacks = search_texts(&history);
         Self {
             dir,
             root,
@@ -95,15 +160,17 @@ impl HistoryState {
             raw,
             selected,
             filter: String::new(),
+            haystacks,
+            tags_expanded: false,
             branch_filter: BranchFilter::All,
             diff_target: Target::Previous,
-            diff_open: true,
+            diff_open: false,
             diff_lines: Vec::new(),
             diff_incoming: Vec::new(),
             diff_error: String::new(),
-            diff_loading: selected.is_some(),
+            diff_loading: false,
             diff_revision: String::new(),
-            pending: selected.map(|_| Instant::now()),
+            pending: None,
             loader: None,
             scroll_to_selected: true,
             demo: false,
@@ -206,11 +273,13 @@ impl HistoryState {
         }
 
         self.history = history;
+        self.haystacks = search_texts(&self.history);
         self.working = working;
         self.working_state = working_state;
         self.raw = raw;
         self.loading = false;
         self.error.clear();
+        self.tags_expanded = false;
         self.loader = None;
         self.diff_incoming.clear();
         self.diff_lines.clear();
@@ -224,9 +293,20 @@ impl HistoryState {
                     .position(|node| node.revision == revision)
             })
             .or_else(|| self.history.working_index(&self.working));
-        self.pending = self.selected.map(|_| Instant::now());
-        self.diff_loading = self.diff_open && self.selected.is_some();
+        self.queue_preview();
         self.scroll_to_selected = true;
+    }
+
+    /// Start a debounced preview when there is a revision and the diff window is open.
+    /// With the window closed nothing runs, so browsing revisions costs no `cvs diff`.
+    fn queue_preview(&mut self) {
+        if self.demo || !self.diff_open || self.selected.is_none() {
+            self.pending = None;
+            self.diff_loading = false;
+        } else {
+            self.pending = Some(Instant::now());
+            self.diff_loading = true;
+        }
     }
 
     fn select(&mut self, index: usize) {
@@ -234,13 +314,13 @@ impl HistoryState {
             return;
         }
         self.selected = Some(index);
+        self.tags_expanded = false;
         self.loader = None;
         self.diff_incoming.clear();
         self.diff_lines.clear();
         self.diff_error.clear();
         self.diff_revision.clear();
-        self.pending = Some(Instant::now());
-        self.diff_loading = self.diff_open;
+        self.queue_preview();
     }
 
     fn set_target(&mut self, target: Target) {
@@ -248,13 +328,14 @@ impl HistoryState {
             return;
         }
         self.diff_target = target;
-        self.loader = None;
-        self.diff_incoming.clear();
-        self.diff_lines.clear();
-        self.diff_error.clear();
-        self.diff_revision.clear();
-        self.pending = Some(Instant::now());
-        self.diff_loading = self.diff_open;
+        if !self.demo {
+            self.loader = None;
+            self.diff_incoming.clear();
+            self.diff_lines.clear();
+            self.diff_error.clear();
+            self.diff_revision.clear();
+        }
+        self.queue_preview();
     }
 
     fn set_diff_open(&mut self, open: bool) {
@@ -263,8 +344,14 @@ impl HistoryState {
         }
         self.diff_open = open;
         if open {
-            self.pending = self.selected.map(|_| Instant::now());
-            self.diff_loading = self.selected.is_some();
+            if !self.demo {
+                self.loader = None;
+                self.diff_incoming.clear();
+                self.diff_lines.clear();
+                self.diff_error.clear();
+                self.diff_revision.clear();
+            }
+            self.queue_preview();
         } else {
             self.loader = None;
             self.pending = None;
@@ -273,11 +360,15 @@ impl HistoryState {
     }
 
     fn reload_diff(&mut self) {
+        if self.demo {
+            return;
+        }
         self.loader = None;
         self.diff_incoming.clear();
+        self.diff_lines.clear();
         self.diff_error.clear();
-        self.pending = self.selected.map(|_| Instant::now());
-        self.diff_loading = self.diff_open && self.selected.is_some();
+        self.diff_revision.clear();
+        self.queue_preview();
     }
 
     fn tick(&mut self, ctx: &egui::Context, globals: &[String], flags: &[String]) {
@@ -411,35 +502,19 @@ impl HistoryState {
                         .is_some_and(|known| known == id),
                 };
                 branch_ok
-                    && (query.is_empty() || self.search_text(node).to_lowercase().contains(&query))
+                    && (query.is_empty()
+                        || self
+                            .haystacks
+                            .get(*index)
+                            .is_some_and(|text| text.contains(&query)))
             })
             .collect()
-    }
-
-    fn search_text(&self, node: &cvsdesk::graph::RevNode) -> String {
-        let mut text = format!(
-            "{} {} {} {} {} {}",
-            node.revision,
-            node.message,
-            node.author,
-            node.date_time,
-            node.state,
-            node.tags.join(" ")
-        );
-        if node.branch {
-            if let Some(id) = graph::branch_id(&node.revision) {
-                if let Some(label) = self.history.branch_label(&id) {
-                    text.push(' ');
-                    text.push_str(label);
-                }
-            }
-        }
-        text
     }
 
     fn ensure_visible(&mut self, visible: &[usize]) {
         if visible.is_empty() {
             self.selected = None;
+            self.tags_expanded = false;
             self.loader = None;
             self.pending = None;
             self.diff_loading = false;
@@ -486,19 +561,10 @@ pub(super) fn show(
             let visible = state.visible_indices();
             state.ensure_visible(&visible);
 
-            // Panels keep the diff and status visible whatever the window size is, and
-            // let the user drag the split between the revision list and the details.
+            // Panels keep the status visible whatever the window size is, and let the
+            // user drag the split between the revision list and the details. The diff
+            // has its own window, opened from the details' Diff button.
             egui::Panel::bottom("file_history_status").show(ui, |ui| status(ui, state));
-            let diff_panel = egui::Panel::bottom("file_history_diff");
-            let diff_panel = if state.diff_open {
-                diff_panel
-                    .resizable(true)
-                    .default_size(180.0)
-                    .min_size(120.0)
-            } else {
-                diff_panel.resizable(false).exact_size(30.0)
-            };
-            diff_panel.show(ui, |ui| diff(ui, state));
             egui::Panel::right("file_history_details")
                 .resizable(true)
                 .default_size(320.0)
@@ -508,10 +574,34 @@ pub(super) fn show(
                 .show(ui, |ui| list(ui, state, &visible, ui.available_height()));
         });
 
+    if state.diff_open {
+        diff_window(ctx, state);
+    }
+
     if !open {
         action = Some(DialogAction::Close);
     }
     action
+}
+
+/// The floating diff window. It sits beside the history window rather than in it, so
+/// the user can keep clicking revisions and watch the diff follow the selection.
+fn diff_window(ctx: &egui::Context, state: &mut HistoryState) {
+    let mut open = true;
+    egui::Window::new(format!("Diff — {}", state.file))
+        .id(egui::Id::unique("file_history_diff_window"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(720.0)
+        .default_height(420.0)
+        .min_width(420.0)
+        .min_height(220.0)
+        .show(ctx, |ui| diff(ui, state));
+
+    if !open {
+        state.set_diff_open(false);
+    }
 }
 
 fn toolbar(ui: &mut egui::Ui, state: &mut HistoryState, action: &mut Option<DialogAction>) {
@@ -686,7 +776,7 @@ fn list(ui: &mut egui::Ui, state: &mut HistoryState, visible: &[usize], height: 
                 let node = &state.history.revisions[index];
                 let row = row_of[index];
                 let lane = lane_of[index];
-                let tags = state.history.tag_names(&node.revision);
+                let tags = &node.tags;
                 let branch_label = if node.branch {
                     graph::branch_id(&node.revision)
                         .and_then(|id| state.history.branch_label(&id))
@@ -738,41 +828,52 @@ fn list(ui: &mut egui::Ui, state: &mut HistoryState, visible: &[usize], height: 
 
                 let date_right = rect.right() - 6.0;
                 let author_right = date_right - DATE_W;
+                let author = truncate_columns(&node.author, 10);
+                // The author is right-aligned at author_right, so its text grows to the
+                // left. The message and the tag badges must stop before that left edge,
+                // not at the column's right edge.
+                let author_width = painter
+                    .layout_no_wrap(author.clone(), small.clone(), MUTED)
+                    .size()
+                    .x;
                 let msg_x = rev_x + REV_W;
+                let right_limit = author_right - author_width - 8.0;
                 let mut x = msg_x;
 
                 if index == working_index.unwrap_or(usize::MAX) {
-                    x = badge(&painter, x, y, "working", &small, WORKING);
+                    x = badge_fit(&painter, x, y, "working", &small, WORKING, right_limit);
                 }
                 if index == latest.unwrap_or(usize::MAX) {
-                    x = badge(&painter, x, y, "latest", &small, LATEST);
+                    x = badge_fit(&painter, x, y, "latest", &small, LATEST, right_limit);
                 }
                 if node.state == "dead" {
-                    x = badge(&painter, x, y, "dead", &small, DEAD);
+                    x = badge_fit(&painter, x, y, "dead", &small, DEAD, right_limit);
                 }
                 if first_on_branch {
                     if let Some(label) = &branch_label {
-                        x = badge(&painter, x, y, label, &small, BRANCH);
+                        x = badge_fit(&painter, x, y, label, &small, BRANCH, right_limit);
                     }
                 }
-                for tag in tags.iter().take(2) {
-                    x = badge(&painter, x, y, tag, &small, REV_TEXT);
+                if let Some((tag, more)) = shown_tag(tags) {
+                    let more_label = (more > 0).then(|| format!("+{more}"));
+                    let reserve = more_label.as_ref().map_or(0.0, |label| {
+                        painter
+                            .layout_no_wrap(label.clone(), small.clone(), MUTED)
+                            .size()
+                            .x
+                            + 5.0
+                    });
+                    x = badge_fit(&painter, x, y, tag, &small, REV_TEXT, right_limit - reserve);
+                    if let Some(label) = more_label {
+                        x = badge_fit(&painter, x, y, &label, &small, MUTED, right_limit);
+                    }
                 }
 
-                let available = (author_right - 8.0 - x).max(20.0);
-                let cell = (body.size * 0.5).max(1.0);
-                let cols = (available / cell) as usize;
-                painter.text(
-                    egui::pos2(x.max(msg_x), y),
-                    egui::Align2::LEFT_CENTER,
-                    truncate_columns(&node.message, cols),
-                    body.clone(),
-                    MESSAGE,
-                );
+                draw_message(&painter, x.max(msg_x), y, &node.message, body, right_limit);
                 painter.text(
                     egui::pos2(author_right, y),
                     egui::Align2::RIGHT_CENTER,
-                    truncate_columns(&node.author, 10),
+                    author,
                     small.clone(),
                     MUTED,
                 );
@@ -807,6 +908,70 @@ fn badge(
         color,
     );
     rect.right() + 5.0
+}
+
+/// Paint a badge that may not run past `right_limit`; a long tag is shortened with an
+/// ellipsis instead of covering the author and date columns.
+fn badge_fit(
+    painter: &egui::Painter,
+    x: f32,
+    y: f32,
+    text: &str,
+    font: &egui::FontId,
+    color: egui::Color32,
+    right_limit: f32,
+) -> f32 {
+    let room = (right_limit - x - 5.0).max(0.0);
+    if room <= 0.0 {
+        return x;
+    }
+    let full = painter.layout_no_wrap(text.to_string(), font.clone(), color);
+    if full.size().x <= room {
+        return badge(painter, x, y, text, font, color);
+    }
+
+    // Longest prefix that still fits with the ellipsis after it.
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0;
+    let mut high = chars.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let mut candidate: String = chars[..mid].iter().collect();
+        candidate.push('…');
+        let width = painter
+            .layout_no_wrap(candidate, font.clone(), color)
+            .size()
+            .x;
+        if width <= room {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if low == 0 {
+        return x;
+    }
+    let mut shown: String = chars[..low].iter().collect();
+    shown.push('…');
+    badge(painter, x, y, &shown, font, color)
+}
+
+/// Draw a message in the columns between `x` and `right_limit`, cut with an ellipsis at
+/// the real pixel width. Nothing is drawn when the badges already used the room.
+fn draw_message(
+    painter: &egui::Painter,
+    x: f32,
+    y: f32,
+    text: &str,
+    font: egui::FontId,
+    right_limit: f32,
+) {
+    let width = right_limit - x;
+    if text.is_empty() || width < 24.0 {
+        return;
+    }
+    let galley = painter.layout_job(message_job(text, font, width));
+    painter.galley(egui::pos2(x, y - galley.size().y / 2.0), galley, MESSAGE);
 }
 
 /// The vertical part of a lane in one row, as (starts at the row top, reaches the row
@@ -881,8 +1046,18 @@ fn details(ui: &mut egui::Ui, state: &mut HistoryState) {
 
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(format!("Revision {}", node.revision)).heading());
-        for tag in state.history.tag_names(&node.revision) {
+        if let Some((tag, more)) = shown_tag(&node.tags) {
             ui.label(egui::RichText::new(tag).small().color(REV_TEXT));
+            if more > 0 {
+                let label = if state.tags_expanded {
+                    "Show less".to_string()
+                } else {
+                    format!("+{more} more")
+                };
+                if ui.small_button(label).clicked() {
+                    state.tags_expanded = !state.tags_expanded;
+                }
+            }
         }
         if node.branch {
             if let Some(id) = graph::branch_id(&node.revision) {
@@ -893,6 +1068,20 @@ fn details(ui: &mut egui::Ui, state: &mut HistoryState) {
             ui.label(egui::RichText::new("trunk").small().color(MUTED));
         }
     });
+
+    if state.tags_expanded && node.tags.len() > 1 {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("file_history_tags")
+                .max_height(160.0)
+                .auto_shrink([false, true])
+                .show_rows(ui, 20.0, node.tags.len(), |ui, rows| {
+                    for tag in &node.tags[rows] {
+                        ui.label(egui::RichText::new(tag).small().color(REV_TEXT));
+                    }
+                });
+        });
+    }
 
     ui.label(
         egui::RichText::new(format!("{} · {}", node.author, node.date_time))
@@ -936,19 +1125,14 @@ fn details(ui: &mut egui::Ui, state: &mut HistoryState) {
         if ui.button("Copy revision").clicked() {
             ui.ctx().copy_text(node.revision.clone());
         }
+        if ui.button("Diff…").clicked() {
+            state.set_diff_open(true);
+        }
     });
 }
 
 fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
     ui.horizontal(|ui| {
-        let label = if state.diff_open {
-            "Hide diff"
-        } else {
-            "Show diff"
-        };
-        if ui.small_button(label).clicked() {
-            state.set_diff_open(!state.diff_open);
-        }
         ui.label(egui::RichText::new("Diff").strong());
         let previous_on = state.diff_target == Target::Previous;
         if ui.selectable_label(previous_on, "This revision").clicked() {
@@ -991,12 +1175,22 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
             if ui.small_button("Reload").clicked() {
                 state.reload_diff();
             }
+            if let Some(index) = state.selected {
+                if let Some(node) = state.history.revisions.get(index) {
+                    if !state.diff_revision.is_empty()
+                        && state.diff_revision != node.revision
+                        && !state.diff_loading
+                    {
+                        ui.label(
+                            egui::RichText::new("diff is for an older selection")
+                                .small()
+                                .color(WORKING),
+                        );
+                    }
+                }
+            }
         });
     });
-
-    if !state.diff_open {
-        return;
-    }
 
     let body = if state.selected.is_none() {
         "Select a revision.".to_string()
@@ -1057,22 +1251,6 @@ fn status(ui: &mut egui::Ui, state: &HistoryState) {
                     .color(WORKING),
             );
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(index) = state.selected {
-                if let Some(node) = state.history.revisions.get(index) {
-                    if !state.diff_revision.is_empty()
-                        && state.diff_revision != node.revision
-                        && !state.diff_loading
-                    {
-                        ui.label(
-                            egui::RichText::new("diff is for an older selection")
-                                .small()
-                                .color(WORKING),
-                        );
-                    }
-                }
-            }
-        });
     });
 }
 
@@ -1112,7 +1290,57 @@ mod tests {
                 .iter()
                 .position(|n| n.revision == "1.4")
         );
-        assert!(state.diff_loading, "opening starts the diff preview");
+        assert!(
+            !state.diff_open,
+            "the diff waits for its window to be opened"
+        );
+        assert!(!state.diff_loading, "opening the window starts no diff");
+        assert!(state.pending.is_none(), "no preview is queued");
+    }
+
+    #[test]
+    fn the_diff_preview_starts_only_when_its_window_opens() {
+        let mut state = sample();
+        state.set_diff_open(true);
+
+        assert!(state.diff_open);
+        assert!(
+            state.pending.is_some(),
+            "opening the diff window queues a preview"
+        );
+        assert!(
+            state.diff_loading,
+            "the diff window shows its loading state"
+        );
+    }
+
+    #[test]
+    fn closing_the_diff_window_cancels_the_preview() {
+        let mut state = sample();
+        state.set_diff_open(true);
+        state.set_diff_open(false);
+
+        assert!(!state.diff_open);
+        assert!(state.pending.is_none(), "the debounce is dropped");
+        assert!(!state.diff_loading, "the spinner stops");
+    }
+
+    #[test]
+    fn selecting_with_the_diff_closed_keeps_the_preview_idle() {
+        let mut state = sample();
+        let index = state
+            .history
+            .revisions
+            .iter()
+            .position(|node| node.revision == "1.3")
+            .expect("the sample has 1.3");
+
+        state.select(index);
+
+        assert_eq!(state.selected, Some(index));
+        assert!(state.pending.is_none(), "a closed diff runs nothing");
+        assert!(!state.diff_loading);
+        assert!(state.diff_lines.is_empty());
     }
 
     #[test]
@@ -1131,8 +1359,9 @@ mod tests {
     }
 
     #[test]
-    fn selecting_another_revision_queues_a_fresh_diff() {
+    fn selecting_another_revision_queues_a_fresh_diff_while_open() {
         let mut state = sample();
+        state.set_diff_open(true);
         state.selected = Some(0);
         state.pending = None;
         state.diff_loading = false;
@@ -1184,6 +1413,167 @@ mod tests {
         )
         .as_deref()
             == Some("1.2.4")));
+    }
+
+    #[test]
+    fn only_the_newest_tag_and_a_count_are_shown() {
+        let tags: Vec<String> = [
+            "BSC_GK602526_1_CHENSHAOYU",
+            "BSC_PD_20260820_1",
+            "BSC_PD_20261126_1",
+        ]
+        .iter()
+        .map(|tag| tag.to_string())
+        .collect();
+
+        assert_eq!(
+            shown_tag(&tags),
+            Some(("BSC_PD_20261126_1", 2)),
+            "the last name is the newest-looking tag"
+        );
+        assert_eq!(
+            shown_tag(&tags[..1]),
+            Some(("BSC_GK602526_1_CHENSHAOYU", 0))
+        );
+        assert_eq!(shown_tag(&[]), None);
+    }
+
+    #[test]
+    fn choosing_another_revision_collapses_the_full_tag_list() {
+        let mut state = sample();
+        state.tags_expanded = true;
+        let index = state
+            .history
+            .revisions
+            .iter()
+            .position(|node| node.revision == "1.3")
+            .expect("the sample has 1.3");
+
+        state.select(index);
+
+        assert!(!state.tags_expanded, "the next revision starts compact");
+    }
+
+    #[test]
+    fn the_filter_text_is_ready_with_tags_and_branch_labels() {
+        let state = sample();
+        let texts = search_texts(&state.history);
+        let index = |revision: &str| {
+            state
+                .history
+                .revisions
+                .iter()
+                .position(|node| node.revision == revision)
+                .expect("the sample has the revision")
+        };
+
+        assert!(texts[index("1.4")].contains("release_1_4"));
+        assert!(
+            texts[index("1.2.4.1")].contains("vendor_acme"),
+            "a branch lane is found by its tag too: {}",
+            texts[index("1.2.4.1")]
+        );
+    }
+
+    #[test]
+    fn a_long_message_stops_before_the_author_column() {
+        let mut state = sample();
+        let index = state
+            .history
+            .revisions
+            .iter()
+            .position(|node| node.revision == "1.4")
+            .expect("the sample has 1.4");
+        state.history.revisions[index].message =
+            "dealGroupAllBatchOperationMerged方法增加 上下文填充逻辑，改完以后需要重新跑一遍批处理验证"
+                .repeat(6);
+        state.history.revisions[index].author = "lumingwei".into();
+        state.selected = Some(index);
+        state.scroll_to_selected = false;
+        let visible = state.visible_indices();
+
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    list(ui, &mut state, &visible, 500.0);
+                });
+            },
+        );
+        output.textures_delta.clear();
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+
+        let message = texts
+            .iter()
+            .find(|(text, _)| text.starts_with("dealGroupAllBatch"))
+            .expect("the row paints its message");
+        let author = texts
+            .iter()
+            .find(|(text, _)| text == "lumingwei")
+            .expect("the row paints its author");
+        assert!(
+            message.1.right() <= author.1.left() + 0.5,
+            "the message overlaps the author: message right {}, author left {}",
+            message.1.right(),
+            author.1.left()
+        );
+    }
+
+    #[test]
+    fn a_long_chinese_message_is_cut_to_the_pixels_it_may_use() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        // Fonts only exist after the first frame has run.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |_ui| {},
+        );
+        output.textures_delta.clear();
+        let job = message_job(
+            "601034-1 合并-电视续约的需求说明写得非常长，应该被省略号截断",
+            egui::FontId::proportional(14.0),
+            120.0,
+        );
+        let galley = ctx.fonts_mut(|fonts| fonts.layout_job(job));
+
+        assert!(
+            galley.size().x <= 120.5,
+            "the message must stay inside its column: {} px",
+            galley.size().x
+        );
+        assert!(galley.elided, "long text ends in an ellipsis");
     }
 
     #[test]
