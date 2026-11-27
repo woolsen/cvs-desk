@@ -29,6 +29,9 @@ pub const KEEP_DAYS: u64 = 14;
 
 const LOG_NAME: &str = "cvsdesk.log";
 const MAX_SCALAR: usize = 80;
+/// The most text one record may carry. A dependency's error can quote a whole shader or
+/// a file, and one such line would undo the rotation budget.
+const MAX_RECORD: usize = 512;
 
 /// True when the level came from a switch or the environment, so the Preferences check
 /// may not override it.
@@ -125,9 +128,84 @@ pub fn file_name(name: &str) -> String {
 /// One external string reduced to a scalar a log line can hold. Control characters become
 /// `?` so a name cannot forge a line, and a long value is cut short.
 pub fn scalar(text: &str) -> String {
-    let mut out = String::with_capacity(text.len().min(MAX_SCALAR));
+    one_line(text, MAX_SCALAR)
+}
+
+/// A source location as the log carries it.
+///
+/// A path inside this program keeps its relative form. A dependency's absolute path keeps
+/// only its last three components, so no drive letter, UNC share or profile name reaches
+/// the file when a font parser or a GPU driver panics.
+pub fn source_file(file: &str) -> String {
+    let absolute =
+        file.as_bytes().get(1) == Some(&b':') || file.starts_with("\\\\") || file.starts_with('/');
+    if !absolute {
+        return scalar(file);
+    }
+    let mut parts: Vec<&str> = file.rsplit(['/', '\\']).take(3).collect();
+    parts.reverse();
+    scalar(&parts.join("/"))
+}
+
+/// External text with everything from its first path-like start replaced by `<path>`.
+///
+/// A panic message or a dependency's error can name a file. Where a path ends cannot be
+/// known in general (spaces are legal in one), so the rest of the message is dropped: what
+/// came before it still says what failed, and nothing after it can leak.
+pub fn redact_paths(text: &str) -> String {
+    match path_start(text) {
+        Some(start) => {
+            let mut kept = String::with_capacity(start + 8);
+            kept.push_str(&text[..start]);
+            kept.push_str("<path>");
+            scalar(&kept)
+        }
+        None => scalar(text),
+    }
+}
+
+/// The byte index of the first path-looking token: `C:\`, `C:/`, `\\server`, or a POSIX
+/// home or system root.
+fn path_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    for index in 0..bytes.len() {
+        if index + 1 < bytes.len()
+            && bytes[index].is_ascii_alphabetic()
+            && bytes[index + 1] == b':'
+            && matches!(bytes.get(index + 2), Some(&b'\\') | Some(&b'/'))
+        {
+            return Some(index);
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'\\' && bytes[index + 1] == b'\\' {
+            return Some(index);
+        }
+    }
+    let mut earliest = None;
+    for needle in [
+        "/home/",
+        "/Users/",
+        "/root/",
+        "/var/",
+        "/tmp/",
+        "/opt/",
+        "/mnt/",
+        "/Volumes/",
+        "/private/",
+        "~/",
+    ] {
+        if let Some(index) = text.find(needle) {
+            earliest = Some(earliest.map_or(index, |best: usize| best.min(index)));
+        }
+    }
+    earliest
+}
+
+/// One line of text, control characters replaced and the length capped. Used for whole
+/// records as well as scalars, so a dependency cannot forge a line or flood the file.
+fn one_line(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max));
     for (taken, ch) in text.chars().enumerate() {
-        if taken == MAX_SCALAR {
+        if taken == max {
             out.push_str("...");
             break;
         }
@@ -164,13 +242,16 @@ pub fn diagnostics_tail(max_lines: usize) -> String {
 /// instead of reporting it. A panic is rare enough that a separate append is cheap.
 pub fn install_panic_hook() {
     let path = log_file();
+    // The standard hook still runs: it prints the thread name and the backtrace when
+    // `RUST_BACKTRACE` asks for one, which a file line cannot replace.
+    let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let location = info
             .location()
             .map(|location| {
                 format!(
                     "{}:{}:{}",
-                    location.file(),
+                    source_file(location.file()),
                     location.line(),
                     location.column()
                 )
@@ -187,7 +268,7 @@ pub fn install_panic_hook() {
             stamp(),
             session(),
             scalar(&location),
-            scalar(message)
+            redact_paths(message)
         );
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -195,7 +276,7 @@ pub fn install_panic_hook() {
         if let Ok(mut file) = open_append(&path) {
             let _ = file.write_all(line.as_bytes());
         }
-        eprintln!("{}", line.trim_end());
+        previous(info);
     }));
 }
 
@@ -227,6 +308,9 @@ struct FileLogger {
 struct State {
     file: Option<File>,
     bytes: u64,
+    /// Set when a rotation could not make room. Writing on would break the size budget
+    /// and retry the renames on every line, so this run stops logging instead.
+    full: bool,
 }
 
 impl FileLogger {
@@ -240,10 +324,15 @@ impl FileLogger {
 
 impl Log for FileLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        // Our own records are what a bug report needs. A dependency's debug output is
-        // often a dump of generated shaders or protocol internals: it fills the file
-        // without saying anything about the window. Its warnings and errors still pass.
-        metadata.target().starts_with("cvsdesk") || metadata.level() <= Level::Info
+        let target = metadata.target();
+        if target == "cvsdesk" || target.starts_with("cvsdesk::") {
+            return true;
+        }
+        // A dependency's text is outside this module's privacy rules: one `Path::display()`
+        // in a warning would put a full path in a bug report. GPU failures are the only
+        // dependency reports a user needs, and only at warning or error.
+        metadata.level() <= Level::Warn
+            && (target.starts_with("wgpu") || target.starts_with("naga"))
     }
 
     fn log(&self, record: &Record<'_>) {
@@ -252,7 +341,8 @@ impl Log for FileLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        let mut line = String::with_capacity(128);
+        let args = one_line(&record.args().to_string(), MAX_RECORD);
+        let mut line = String::with_capacity(128 + args.len());
         let _ = write!(
             line,
             "{} {:<5} s={} {} ",
@@ -261,7 +351,7 @@ impl Log for FileLogger {
             session(),
             record.target()
         );
-        let _ = write!(line, "{}", record.args());
+        line.push_str(&args);
         line.push('\n');
         let mut state = self
             .state
@@ -275,12 +365,23 @@ impl Log for FileLogger {
 
 impl State {
     fn write(&mut self, path: &Path, line: &[u8]) {
+        if self.full {
+            return;
+        }
         if self.file.is_none() {
             self.open(path);
         }
         if self.bytes > 0 && self.bytes + line.len() as u64 > MAX_BYTES {
             self.rotate(path);
             self.open(path);
+            if self.bytes + line.len() as u64 > MAX_BYTES {
+                // Something else holds the file (a viewer, a second build without
+                // delete sharing, a scanner). Keep what is there instead of growing
+                // without bound and retrying the rename for every line.
+                self.full = true;
+                self.file = None;
+                return;
+            }
         }
         if let Some(file) = self.file.as_mut() {
             if file.write_all(line).is_ok() {
@@ -348,7 +449,8 @@ fn clean_old_at(dir: &Path, now: SystemTime) {
 }
 
 fn last_line(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
+    let bytes = fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
     text.lines()
         .rev()
         .find(|line| !line.trim().is_empty())
@@ -356,8 +458,11 @@ fn last_line(path: &Path) -> Option<String> {
 }
 
 fn tail_of(path: &Path, max_lines: usize) -> String {
-    match fs::read_to_string(path) {
-        Ok(body) => {
+    match fs::read(path) {
+        Ok(bytes) => {
+            // A crash in the middle of a write can leave half a UTF-8 character; the
+            // rest of the file is still worth copying.
+            let body = String::from_utf8_lossy(&bytes);
             let lines: Vec<&str> = body.lines().collect();
             let start = lines.len().saturating_sub(max_lines);
             let mut text = lines[start..].join("\n");
@@ -413,7 +518,7 @@ mod tests {
         let record = log::Record::builder()
             .args(args)
             .level(Level::Info)
-            .target("test")
+            .target("cvsdesk::test")
             .build();
         Log::log(logger, &record);
     }
@@ -470,9 +575,11 @@ mod tests {
     fn the_log_rotates_into_numbered_files() {
         let dir = scratch("rotate");
         let path = dir.join("cvsdesk.log");
-        let logger = FileLogger::at(path.clone());
-        write_record(&logger, &"x".repeat(MAX_BYTES as usize));
-        write_record(&logger, "after rotation");
+        // The record writer caps one line; rotation is the file's own rule, so it is
+        // exercised directly with a line that fills the budget.
+        let mut state = State::default();
+        state.write(&path, &vec![b'x'; MAX_BYTES as usize]);
+        state.write(&path, b"after rotation\n");
         assert!(dir.join("cvsdesk.1.log").is_file());
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("after rotation"), "{}", body);
@@ -490,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dependency_debug_line_is_not_kept() {
+    fn a_dependency_warning_outside_the_gpu_is_not_kept() {
         let dir = scratch("filter");
         let path = dir.join("cvsdesk.log");
         let logger = FileLogger::at(path.clone());
@@ -503,7 +610,13 @@ mod tests {
             "a dependency's shader dump would fill the file"
         );
         assert!(enabled("naga::valid::interface", Level::Warn));
+        assert!(enabled("wgpu_core::device", Level::Error));
+        assert!(
+            !enabled("eframe::native::file_storage", Level::Warn),
+            "another dependency's warning may name a path"
+        );
         assert!(enabled("cvsdesk::app::command", Level::Debug));
+        assert!(enabled("cvsdesk::app::command", Level::Info));
 
         // `log` calls `log` without asking `enabled`, so the filter must hold there too.
         let record = log::Record::builder()
@@ -514,6 +627,72 @@ mod tests {
         Log::log(&logger, &record);
         let written = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(!written.contains("shader dump"), "{}", written);
+    }
+
+    #[test]
+    fn a_source_file_keeps_no_drive_or_profile() {
+        assert_eq!(source_file("src/app/remote.rs"), "src/app/remote.rs");
+        assert_eq!(
+            source_file(r"C:\Users\ann\.cargo\registry\src\egui-0.37.0\src\lib.rs"),
+            "egui-0.37.0/src/lib.rs"
+        );
+        assert_eq!(
+            source_file(r"\\server\share\crate\src\lib.rs"),
+            "crate/src/lib.rs"
+        );
+        let unix = source_file("/home/ann/project/src/main.rs");
+        assert_eq!(unix, "project/src/main.rs");
+        assert!(!unix.contains("ann"), "{}", unix);
+    }
+
+    #[test]
+    fn a_panic_message_cannot_carry_a_path() {
+        let text = redact_paths("cannot read C:\\Users\\ann\\secret.txt: access denied");
+        assert!(text.starts_with("cannot read"), "{}", text);
+        assert!(!text.contains("Users"), "{}", text);
+        assert!(!text.contains("secret"), "{}", text);
+        assert!(text.contains("<path>"), "{}", text);
+
+        let unix = redact_paths("cannot read /home/ann/secret.txt");
+        assert!(!unix.contains("secret"), "{}", unix);
+        assert!(!unix.contains("/home"), "{}", unix);
+        assert_eq!(redact_paths("index out of bounds"), "index out of bounds");
+    }
+
+    #[test]
+    fn one_record_cannot_fill_the_file() {
+        let dir = scratch("cap");
+        let path = dir.join("cvsdesk.log");
+        let logger = FileLogger::at(path.clone());
+        write_record(&logger, &"x".repeat(MAX_RECORD * 4));
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.len() < MAX_RECORD + 200, "{}", body.len());
+        assert!(body.contains("..."), "{}", body);
+        assert!(
+            !body.contains("\nINFO"),
+            "a record cannot forge a second line: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn a_record_cannot_forge_a_line() {
+        let dir = scratch("forge");
+        let path = dir.join("cvsdesk.log");
+        let logger = FileLogger::at(path.clone());
+        write_record(&logger, "first\nINFO forged");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("first?INFO forged"), "{}", body);
+        assert!(!body.contains("\nINFO forged"), "{}", body);
+    }
+
+    #[test]
+    fn a_torn_utf8_tail_is_still_copied() {
+        let dir = scratch("torn");
+        let path = dir.join("cvsdesk.log");
+        std::fs::write(&path, [0xff, b'o', b'k', b'\n']).unwrap();
+        let tail = tail_of(&path, 10);
+        assert!(tail.contains("ok"), "{:?}", tail);
     }
 
     #[test]

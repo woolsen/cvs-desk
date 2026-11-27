@@ -290,13 +290,16 @@ impl<'a> Session<'a> {
                 session.err("server doesn't support gzip-file-contents".to_string());
             }
         }
+        let gzip = level > 0 && session.supports("Gzip-stream");
         log::debug!(
             target: "cvsdesk::protocol",
-            "phase=start cmd={} utf8={} capabilities={} compression={}",
+            "phase=start cmd={} utf8={} case={} gzip={} z={} capabilities={}",
             session.command,
             session.utf8_names,
-            session.capabilities.len(),
-            level
+            session.supports("Case"),
+            gzip,
+            level,
+            session.capabilities.len()
         );
         Ok(session)
     }

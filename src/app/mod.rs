@@ -30,6 +30,10 @@ mod version_loader;
 #[cfg(test)]
 mod tests;
 
+/// How many uncaptured GPU errors this run has already reported. A broken pipeline repaints
+/// every frame, so without a cap one failure would fill the log in seconds.
+static GPU_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Which pane at the bottom shows what.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum OutputKind {
@@ -233,12 +237,20 @@ impl App {
             render_state
                 .device
                 .on_uncaptured_error(std::sync::Arc::new(move |error| {
-                    log::error!(
-                        target: "cvsdesk::gpu",
-                        "uncaptured error message={}",
-                        cvsdesk::diag::scalar(&error.to_string())
-                    );
-                    eprintln!("wgpu error (continuing): {error}");
+                    let seen = GPU_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if seen < 3 {
+                        log::error!(
+                            target: "cvsdesk::gpu",
+                            "uncaptured error n={} message={}",
+                            seen,
+                            cvsdesk::diag::scalar(&error.to_string())
+                        );
+                    } else if seen == 3 {
+                        log::error!(
+                            target: "cvsdesk::gpu",
+                            "uncaptured error further=suppressed"
+                        );
+                    }
                     // A failed surface configure is recovered by the next paint, which
                     // reconfigures or recreates the surface it finds out of date.
                     repaint.request_repaint();

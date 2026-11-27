@@ -437,6 +437,10 @@ impl HistoryState {
             Ok(message) => message,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                log::error!(
+                    target: "cvsdesk::diff",
+                    "phase=preview result=worker-vanished"
+                );
                 Msg::Failed("the diff preview stopped".into())
             }
         };
@@ -458,6 +462,9 @@ impl HistoryState {
                 self.diff_revision = loader.revision.clone();
             }
             Msg::Failed(error) => {
+                // The text can name a path (`cannot read <path>: ...`), so only the event
+                // goes to the file; the window shows the full message.
+                log::warn!(target: "cvsdesk::diff", "phase=preview result=failed");
                 self.diff_model = None;
                 self.diff_error = error;
                 self.diff_loading = false;

@@ -382,10 +382,14 @@ pub fn connect(
                 None => match sink.secret("CVS password: ".to_string()) {
                     Some(password) => passfile::scramble(password.as_bytes()),
                     None => {
+                        log::warn!(
+                            target: "cvsdesk::connect",
+                            "phase=auth result=no-password"
+                        );
                         return Err(Error::aborted(
                             command,
                             "no saved password for this root; run 'cvs login' first",
-                        ))
+                        ));
                     }
                 },
             };

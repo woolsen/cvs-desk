@@ -52,7 +52,8 @@ program version and the most recent lines on the clipboard.
 
 `--log-level debug` adds per-phase detail, and `CVSDESK_LOG=debug` does the same for a start
 that cannot take a switch. The Preferences window can turn the same detail on for the next
-start. A debug log beside a bug report is worth more than a description of the window alone.
+start. Old logs are removed after 14 days. A debug log beside a bug report is worth more
+than a description of the window alone.
 
 ## Features
 

@@ -395,6 +395,9 @@ impl App {
 
     /// Drop the running listing, if any. `Loader::drop` cancels its worker.
     pub(super) fn cancel_remote(&mut self) {
+        if self.remote.is_some() {
+            log::debug!(target: "cvsdesk::remote", "phase=end result=cancelled");
+        }
         self.remote = None;
         self.remote_parser = None;
         self.remote_pending.clear();
@@ -414,6 +417,11 @@ impl App {
         self.remote_lines.clear();
         self.flush_remote_pending();
         self.remote_state = RemoteState::Stopped;
+        log::info!(
+            target: "cvsdesk::remote",
+            "phase=end result=stopped found={}",
+            self.remote_found
+        );
         self.status = format!("Server folder list stopped — {} found", self.remote_found);
     }
 
@@ -448,6 +456,9 @@ impl App {
             (lines, finished, current)
         };
         if !current {
+            if finished.is_some() {
+                log::debug!(target: "cvsdesk::remote", "phase=end result=stale");
+            }
             return;
         }
         self.absorb_remote_lines(lines);

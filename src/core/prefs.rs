@@ -279,6 +279,15 @@ impl Prefs {
         if let Some(path) = Self::settings_file() {
             match std::fs::read_to_string(path) {
                 Ok(text) => {
+                    if !text.trim().is_empty() && text.parse::<Table>().is_err() {
+                        // The legacy reader may still understand it, but a file that is
+                        // neither TOML nor that shape loads as defaults and would look
+                        // like "all settings were reset".
+                        log::warn!(
+                            target: "cvsdesk::settings",
+                            "phase=parse result=not-toml source=file"
+                        );
+                    }
                     log::info!(target: "cvsdesk::settings", "phase=load source=toml");
                     return Some(Self::from_settings_text(&text));
                 }
@@ -681,7 +690,15 @@ fn string_list(value: &Value) -> Vec<String> {
 /// yet. Keys this version does not know stay in the table.
 fn read_table(path: &Path) -> Table {
     match std::fs::read_to_string(path) {
-        Ok(text) => return table_from_settings_text(&text),
+        Ok(text) => {
+            if !text.trim().is_empty() && text.parse::<Table>().is_err() {
+                log::warn!(
+                    target: "cvsdesk::settings",
+                    "phase=parse result=not-toml source=file"
+                );
+            }
+            return table_from_settings_text(&text);
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => log::warn!(
             target: "cvsdesk::settings",

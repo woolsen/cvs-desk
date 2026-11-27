@@ -28,9 +28,9 @@ impl App {
     /// change where its refresh or diff preview runs.
     fn start_in(&mut self, dir: PathBuf, mut req: CommandRequest, kind: OutputKind) -> bool {
         if self.runner.running {
-            log::warn!(
+            log::debug!(
                 target: "cvsdesk::command",
-                "phase=refused reason=busy"
+                "phase=refused reason=busy from=start"
             );
             self.runner
                 .lines
@@ -62,7 +62,7 @@ impl App {
         };
         log::info!(
             target: "cvsdesk::command",
-            "id={} cmd={} phase=start files={} args={} root={} raw={} refresh={}",
+            "id={} cmd={} phase=start files={} arg_count={} root={} raw={} refresh={}",
             id,
             what,
             req.files.len(),
@@ -209,6 +209,10 @@ impl App {
             return;
         }
         if self.runner.running {
+            log::debug!(
+                target: "cvsdesk::command",
+                "phase=refused reason=busy from=history"
+            );
             self.runner
                 .lines
                 .push("Error : cvs is already running !".into());
@@ -276,6 +280,10 @@ impl App {
     /// nothing is selected. The window appears at once and its list follows the reply.
     pub(super) fn open_tags(&mut self) {
         if self.runner.running {
+            log::debug!(
+                target: "cvsdesk::command",
+                "phase=refused reason=busy from=tags-open"
+            );
             self.status = "Stop cvs before managing tags".into();
             return;
         }
@@ -306,6 +314,10 @@ impl App {
     /// Ask for the tag list. `poll` parses the captured reply into the open window.
     pub(super) fn request_tags(&mut self) {
         if self.runner.running {
+            log::debug!(
+                target: "cvsdesk::command",
+                "phase=refused reason=busy from=tags-refresh"
+            );
             if let Some(Dialog::Tags(state)) = self.dialog.as_mut() {
                 state.loading = false;
                 state.error = "Another cvs command is running".into();
@@ -354,7 +366,7 @@ impl App {
         if vanished && !msgs.iter().any(|m| matches!(m, Msg::Done(_))) {
             log::error!(
                 target: "cvsdesk::command",
-                "id={} phase=end result=worker-vanished",
+                "id={} phase=worker result=vanished",
                 self.cmd_seq
             );
             msgs.push(Msg::Line(
@@ -408,7 +420,8 @@ impl App {
                 let ok = exit_code == Some(0) && dir.is_dir();
                 log::info!(
                     target: "cvsdesk::command",
-                    "checkout result={} code={}",
+                    "id={} checkout result={} code={}",
+                    self.cmd_seq,
                     if ok { "ok" } else { "failed" },
                     exit_code.unwrap_or(-1)
                 );
@@ -423,7 +436,8 @@ impl App {
                 let error = first_error(&self.captured);
                 log::info!(
                     target: "cvsdesk::history",
-                    "revisions={} tags={} error={}",
+                    "id={} revisions={} tags={} error={}",
+                    self.cmd_seq,
                     history.revisions.len(),
                     history.tags.len(),
                     !error.is_empty()
@@ -475,7 +489,8 @@ impl App {
                         };
                         log::info!(
                             target: "cvsdesk::tags",
-                            "query tags={} code={} error={}",
+                            "id={} query tags={} code={} error={}",
+                            self.cmd_seq,
                             tags.len(),
                             code,
                             !error.is_empty()
@@ -494,12 +509,23 @@ impl App {
                     }
                     TagWait::AfterWrite => {
                         if code == 0 {
+                            log::info!(
+                                target: "cvsdesk::tags",
+                                "id={} phase=write result=ok",
+                                self.cmd_seq
+                            );
                             if let Some(Dialog::Tags(state)) = self.dialog.as_mut() {
                                 state.loading = false;
                                 state.status = "Done. Refreshing tags…".to_string();
                             }
                             self.request_tags();
                         } else {
+                            log::warn!(
+                                target: "cvsdesk::tags",
+                                "id={} phase=write result=failed code={}",
+                                self.cmd_seq,
+                                code
+                            );
                             // Nothing changed, so there is nothing to read again. Keep
                             // cvs's first error line in the window instead of clearing it
                             // with a refresh query.
@@ -590,6 +616,10 @@ impl App {
 
     pub(super) fn open_folder(&mut self, frame: &eframe::Frame) {
         if self.runner.running {
+            log::debug!(
+                target: "cvsdesk::command",
+                "phase=refused reason=busy from=open-folder"
+            );
             self.status = "Stop cvs before opening another folder".into();
             return;
         }
@@ -610,10 +640,20 @@ impl App {
 
     pub(super) fn explore(&mut self) {
         let dir = self.dir.display().to_string();
-        let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
-        self.runner
-            .lines
-            .push(format!("Opening '{}' in the file browser", dir));
+        match std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+            Ok(_) => self
+                .runner
+                .lines
+                .push(format!("Opening '{}' in the file browser", dir)),
+            Err(error) => {
+                log::warn!(
+                    target: "cvsdesk::ui",
+                    "action=explore result=error {}",
+                    cvsdesk::diag::io_error(&error)
+                );
+                self.status = "Could not open the folder in Explorer".into();
+            }
+        }
     }
 
     /// Show the folder the diagnostics log is written to. The menu item exists so a user
@@ -634,13 +674,24 @@ impl App {
     /// Open the entry's folder in Explorer with the entry itself selected.
     pub(super) fn reveal_in_explorer(&mut self, name: &str) {
         let path = self.dir.join(name);
-        let _ = std::process::Command::new("explorer.exe")
+        match std::process::Command::new("explorer.exe")
             .arg("/select,")
             .arg(&path)
-            .spawn();
-        self.runner
-            .lines
-            .push(format!("Showing '{}' in the file browser", path.display()));
+            .spawn()
+        {
+            Ok(_) => self
+                .runner
+                .lines
+                .push(format!("Showing '{}' in the file browser", path.display())),
+            Err(error) => {
+                log::warn!(
+                    target: "cvsdesk::ui",
+                    "action=reveal result=error {}",
+                    cvsdesk::diag::io_error(&error)
+                );
+                self.status = "Could not show the file in Explorer".into();
+            }
+        }
     }
 
     pub(super) fn edit_selected(&mut self) {
@@ -652,10 +703,23 @@ impl App {
         let viewer = self.prefs.viewer.clone();
         for n in names {
             let path = self.dir.join(&n);
-            let _ = std::process::Command::new(&viewer).arg(&path).spawn();
-            self.runner
-                .lines
-                .push(format!("Editing {}", path.display()));
+            match std::process::Command::new(&viewer).arg(&path).spawn() {
+                Ok(_) => self
+                    .runner
+                    .lines
+                    .push(format!("Editing {}", path.display())),
+                Err(error) => {
+                    // One line for the action, not one per selected file, and no path
+                    // or viewer name: the OS kind is the diagnosis.
+                    log::warn!(
+                        target: "cvsdesk::ui",
+                        "action=edit result=error {}",
+                        cvsdesk::diag::io_error(&error)
+                    );
+                    self.status = "Could not start the viewer".into();
+                    break;
+                }
+            }
         }
     }
 
@@ -682,6 +746,10 @@ impl App {
     /// listed as `Not checked out` until an update fetches them.
     pub(super) fn ensure_and_open_dir(&mut self, name: String) {
         if self.runner.running || self.loading.is_some() {
+            log::debug!(
+                target: "cvsdesk::command",
+                "phase=refused reason=busy from=new-folder"
+            );
             self.status = "Wait for the running command or folder read to finish".into();
             return;
         }

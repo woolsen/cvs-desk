@@ -159,7 +159,7 @@ pub fn run(req: Request, sink: &mut dyn Sink, cancel: &CancelToken) -> Result<i3
     let name = invocation_name(&invocation).to_string();
     log::debug!(
         target: "cvsdesk::client",
-        "phase=run cmd={} args={}",
+        "phase=run cmd={} arg_count={}",
         name,
         req.args.len()
     );

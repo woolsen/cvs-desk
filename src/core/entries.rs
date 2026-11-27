@@ -279,7 +279,15 @@ pub fn timestamps_equal(a: &str, b: &str) -> bool {
     a[..24] == b[..24]
 }
 
-fn state_for(dir: &Path, e: &Entry) -> State {
+/// How many files could not be examined, and the first reason. A folder on a dropped
+/// network share would otherwise write one warning for every file in it.
+#[derive(Default)]
+struct Unreadable {
+    count: usize,
+    first: Option<std::io::ErrorKind>,
+}
+
+fn state_for(dir: &Path, e: &Entry, unreadable: &mut Unreadable) -> State {
     if e.is_dir {
         // A "D" entry records a subfolder CVS looks after. If that folder is gone from disk it
         // is missing, exactly as a deleted file would be; saying "Folder" for something that
@@ -315,14 +323,11 @@ fn state_for(dir: &Path, e: &Entry) -> State {
     match fs::metadata(&file) {
         Err(error) => {
             // A deleted file is expected (it is what "missing" means), but a permission
-            // or sharing failure looks identical in the list. Say which one it was.
+            // or sharing failure looks identical in the list. Count those for one line;
+            // naming every file would turn the log into an operation trail.
             if error.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    target: "cvsdesk::folder",
-                    "phase=metadata file={} {}",
-                    crate::diag::file_name(&e.name),
-                    crate::diag::io_error(&error)
-                );
+                unreadable.count += 1;
+                unreadable.first.get_or_insert(error.kind());
             }
             State::Missing
         }
@@ -408,14 +413,16 @@ pub fn load(dir: &Path) -> Loaded {
 
     let entries_path = cvs_dir.join("Entries");
     // Say how the Entries file was read: CVSNT writes it in the console code page, and a
-    // reader that assumed UTF-8 would show Chinese names as replacement marks.
-    if let Some((_, d)) = read_text_noted(&entries_path) {
+    // reader that assumed UTF-8 would show Chinese names as replacement marks. The same
+    // read feeds the parser; asking for the file twice would log a failure twice.
+    let entries_read = read_text_noted(&entries_path);
+    if let Some((_, d)) = &entries_read {
         if let Some(note) = d.note() {
             notes.push(format!("Entries: {}", note));
         }
     }
-    let (mut entries, dupes, read_ok) = match read_text(&entries_path) {
-        Some(text) => {
+    let (mut entries, dupes, read_ok) = match entries_read {
+        Some((text, _)) => {
             let (e, d) = parse_entries(&text);
             (e, d, true)
         }
@@ -454,6 +461,7 @@ pub fn load(dir: &Path) -> Loaded {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut known: HashSet<String> = HashSet::new();
+    let mut unreadable = Unreadable::default();
 
     for e in &entries {
         known.insert(e.name.clone());
@@ -466,7 +474,7 @@ pub fn load(dir: &Path) -> Loaded {
         rows.push(Row {
             name: e.name.clone(),
             is_dir: e.is_dir,
-            state: state_for(dir, e),
+            state: state_for(dir, e, &mut unreadable),
             origin: Origin::Local,
             revision: e.revision.clone(),
             tag: e.tag.clone(),
@@ -475,6 +483,14 @@ pub fn load(dir: &Path) -> Loaded {
             binary: e.binary(),
             unicode: e.unicode(),
         });
+    }
+    if unreadable.count > 0 {
+        log::warn!(
+            target: "cvsdesk::folder",
+            "phase=state files={} kind={:?}",
+            unreadable.count,
+            unreadable.first
+        );
     }
 
     // Files sitting in the folder that CVS has no entry for.
@@ -728,6 +744,10 @@ mod tests {
         }
     }
 
+    fn state(dir: &Path, entry: &Entry) -> State {
+        state_for(dir, entry, &mut Unreadable::default())
+    }
+
     #[test]
     fn asctime_is_24_characters() {
         let n = NaiveDateTime::parse_from_str("2026-11-05 09:14:03", "%Y-%m-%d %H:%M:%S").unwrap();
@@ -768,26 +788,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(
-            state_for(&dir, &entry("a.c", "0", "")),
+            state(&dir, &entry("a.c", "0", "")),
             State::Added,
             "revision 0 means added, not yet committed"
         );
         assert_eq!(
-            state_for(&dir, &entry("b.c", "-1.2", "")),
+            state(&dir, &entry("b.c", "-1.2", "")),
             State::Removed,
             "a revision starting -1 means removed"
         );
         assert_eq!(
-            state_for(&dir, &entry("c.c", "1.4", "/patched")),
+            state(&dir, &entry("c.c", "1.4", "/patched")),
             State::NeedsPatch,
             "a date starting with / means the update could not finish"
         );
         assert_eq!(
-            state_for(&dir, &entry("d.c", "1.4", "Result of merge")),
+            state(&dir, &entry("d.c", "1.4", "Result of merge")),
             State::Conflict
         );
         assert_eq!(
-            state_for(
+            state(
                 &dir,
                 &entry("d2.c", "1.4", "Result of merge+Tue Nov 24 18:07:25 2026")
             ),
@@ -797,18 +817,18 @@ mod tests {
         let mut folder = entry("sub", "", "");
         folder.is_dir = true;
         assert_eq!(
-            state_for(&dir, &folder),
+            state(&dir, &folder),
             State::Missing,
             "a D entry whose folder is not on disk is missing, not merely a folder"
         );
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         assert_eq!(
-            state_for(&dir, &folder),
+            state(&dir, &folder),
             State::Folder,
             "a D entry is a folder while that folder is really there"
         );
         assert_eq!(
-            state_for(&dir, &entry("gone.c", "1.4", "11/22/2026 09:14:03")),
+            state(&dir, &entry("gone.c", "1.4", "11/22/2026 09:14:03")),
             State::Missing,
             "a recorded file that is not on disk is missing"
         );
@@ -853,7 +873,7 @@ mod tests {
         let utc: DateTime<Utc> = stamp.into();
         let recorded = asctime24(utc.naive_utc());
         assert_eq!(
-            state_for(&dir, &entry("a.txt", "1.1", &recorded)),
+            state(&dir, &entry("a.txt", "1.1", &recorded)),
             State::Unchanged,
             "recorded {} should match the file's UTC time",
             recorded

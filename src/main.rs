@@ -223,7 +223,7 @@ fn main() -> eframe::Result<()> {
         Err(error) => log::error!(
             target: "cvsdesk",
             "session end result=error message={}",
-            cvsdesk::diag::scalar(&error.to_string())
+            cvsdesk::diag::redact_paths(&error.to_string())
         ),
     }
     result
