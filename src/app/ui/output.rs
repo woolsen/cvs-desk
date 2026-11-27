@@ -65,11 +65,6 @@ impl App {
                                     .unwrap_or_else(|| text.clone());
                                 ctx.copy_text(copy);
                             }
-                            ui.label(
-                                egui::RichText::new(format!("{} line(s)", text.lines().count()))
-                                    .small()
-                                    .weak(),
-                            );
                             // The tool that used to sit in the toolbar. It lives beside the
                             // output it stops, and only exists while there is something to stop.
                             if self.runner.running {
