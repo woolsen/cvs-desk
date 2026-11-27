@@ -26,7 +26,7 @@ const WORKING: egui::Color32 = egui::Color32::from_rgb(0x9A, 0x65, 0x00);
 const LATEST: egui::Color32 = egui::Color32::from_rgb(0x2F, 0x5F, 0xB3);
 const DEAD: egui::Color32 = egui::Color32::from_rgb(0xA5, 0x0E, 0x0E);
 
-const ROW_H: f32 = 24.0;
+const ROW_H: f32 = 28.0;
 const GUTTER_LEFT: f32 = 14.0;
 const LANE_GAP: f32 = 15.0;
 const REV_W: f32 = 62.0;
@@ -678,6 +678,10 @@ fn list(ui: &mut egui::Ui, state: &mut HistoryState, visible: &[usize], height: 
         .max_height(height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // A lane is painted inside each row, and the rows keep a 28 px pitch either
+            // way: the gap between rows would cut the branch lines into dashes, so the
+            // rows sit flush and carry the old spacing in their own height.
+            ui.spacing_mut().item_spacing.y = 0.0;
             for &index in visible {
                 let node = &state.history.revisions[index];
                 let row = row_of[index];
@@ -805,6 +809,16 @@ fn badge(
     rect.right() + 5.0
 }
 
+/// The vertical part of a lane in one row, as (starts at the row top, reaches the row
+/// bottom). A lane begins and ends at the node in the middle of its first and last row,
+/// so two branches that share a lane are not joined by the line between their rows.
+fn lane_span(row: usize, start: usize, end: usize) -> Option<(bool, bool)> {
+    if row < start || row > end || start == end {
+        return None;
+    }
+    Some((row != start, row != end))
+}
+
 fn draw_lanes(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -818,29 +832,32 @@ fn draw_lanes(
     let bottom = rect.bottom();
     let middle = rect.center().y;
 
-    if let (Some(first), Some(last)) = (trunk_rows.first(), trunk_rows.last()) {
-        if row >= *first && row <= *last {
+    if let (Some(&first), Some(&last)) = (trunk_rows.first(), trunk_rows.last()) {
+        if let Some((from_top, to_bottom)) = lane_span(row, first, last) {
             painter.line_segment(
-                [egui::pos2(x(0), top), egui::pos2(x(0), bottom)],
+                [
+                    egui::pos2(x(0), if from_top { top } else { middle }),
+                    egui::pos2(x(0), if to_bottom { bottom } else { middle }),
+                ],
                 egui::Stroke::new(1.0_f32, TRUNK),
             );
         }
     }
     for &(branch_lane, start, end, has_fork) in branch_ranges {
-        if row >= start && row <= end {
+        if let Some((from_top, to_bottom)) = lane_span(row, start, end) {
             painter.line_segment(
                 [
-                    egui::pos2(x(branch_lane), top),
-                    egui::pos2(x(branch_lane), bottom),
+                    egui::pos2(x(branch_lane), if from_top { top } else { middle }),
+                    egui::pos2(x(branch_lane), if to_bottom { bottom } else { middle }),
                 ],
                 egui::Stroke::new(1.0_f32, BRANCH),
             );
-            if has_fork && row == end {
-                painter.line_segment(
-                    [egui::pos2(x(0), middle), egui::pos2(x(branch_lane), middle)],
-                    egui::Stroke::new(1.0_f32, BRANCH),
-                );
-            }
+        }
+        if has_fork && row == end {
+            painter.line_segment(
+                [egui::pos2(x(0), middle), egui::pos2(x(branch_lane), middle)],
+                egui::Stroke::new(1.0_f32, BRANCH),
+            );
         }
     }
 
@@ -1167,5 +1184,139 @@ mod tests {
         )
         .as_deref()
             == Some("1.2.4")));
+    }
+
+    #[test]
+    fn a_lane_span_starts_and_ends_at_the_node_in_its_row() {
+        assert_eq!(lane_span(0, 0, 3), Some((false, true)));
+        assert_eq!(lane_span(1, 0, 3), Some((true, true)));
+        assert_eq!(lane_span(3, 0, 3), Some((true, false)));
+        assert_eq!(lane_span(2, 2, 2), None);
+        assert_eq!(lane_span(1, 2, 3), None);
+        assert_eq!(lane_span(4, 2, 3), None);
+    }
+
+    /// The vertical line segments of one colour, as (top, bottom) screen y values.
+    fn verticals(output: &egui::FullOutput, color: egui::Color32) -> Vec<(f32, f32)> {
+        fn walk(shape: &egui::Shape, color: egui::Color32, out: &mut Vec<(f32, f32)>) {
+            match shape {
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == color && (points[0].x - points[1].x).abs() < 0.01 =>
+                {
+                    out.push((points[0].y.min(points[1].y), points[0].y.max(points[1].y)));
+                }
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, color, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, color, &mut out);
+        }
+        out
+    }
+
+    fn in_row(segments: &[(f32, f32)], rect: egui::Rect) -> Option<(f32, f32)> {
+        segments
+            .iter()
+            .copied()
+            .find(|(top, bottom)| *top >= rect.top() - 0.1 && *bottom <= rect.bottom() + 0.1)
+    }
+
+    #[test]
+    fn branch_lanes_connect_their_nodes_without_joining_the_next_branch() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let trunk = [0usize, 1, 3, 6, 7];
+        let branches = [(1usize, 2usize, 3usize, true), (1, 4, 6, true)];
+        let mut rects = Vec::new();
+        let mut output = ctx.run_ui(input, |ui| {
+            for row in [0usize, 3, 4, 7] {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(200.0, ROW_H), egui::Sense::hover());
+                rects.push((row, rect));
+                let lane = if row == 3 || row == 4 { 1 } else { 0 };
+                draw_lanes(ui.painter(), rect, row, lane, &trunk, &branches);
+            }
+        });
+        output.textures_delta.clear();
+
+        let green = verticals(&output, BRANCH);
+        let fork = rects[1].1;
+        let branch_end = in_row(&green, fork).expect("the fork row has a green lane");
+        assert!(
+            (branch_end.1 - fork.center().y).abs() < 0.5,
+            "the lane stops at the fork node: {branch_end:?} in {fork:?}"
+        );
+
+        let next = rects[2].1;
+        let branch_start = in_row(&green, next).expect("the next branch starts with a green lane");
+        assert!(
+            (branch_start.0 - next.center().y).abs() < 0.5,
+            "the next lane starts at its own node: {branch_start:?} in {next:?}"
+        );
+
+        let blue = verticals(&output, TRUNK);
+        let first = rects[0].1;
+        let trunk_start = in_row(&blue, first).expect("the first trunk row has a blue lane");
+        assert!(
+            (trunk_start.0 - first.center().y).abs() < 0.5,
+            "the trunk starts at its newest node: {trunk_start:?} in {first:?}"
+        );
+
+        let last = rects[3].1;
+        let trunk_end = in_row(&blue, last).expect("the last trunk row has a blue lane");
+        assert!(
+            (trunk_end.1 - last.center().y).abs() < 0.5,
+            "the trunk ends at its oldest node: {trunk_end:?} in {last:?}"
+        );
+    }
+
+    #[test]
+    fn the_painted_branch_lanes_are_continuous_within_each_branch() {
+        let mut state = sample();
+        state.scroll_to_selected = false;
+        let visible = state.visible_indices();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| list(ui, &mut state, &visible, 500.0));
+        });
+        output.textures_delta.clear();
+
+        let mut green: Vec<(f32, f32)> = verticals(&output, BRANCH);
+        green.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert!(
+            green.len() >= 5,
+            "the sample paints both branch runs: {green:?}"
+        );
+        let gaps: Vec<f32> = green.windows(2).map(|pair| pair[1].0 - pair[0].1).collect();
+        let unbroken = gaps.iter().filter(|gap| **gap < 0.1).count();
+        let breaks = gaps.iter().filter(|gap| **gap > 0.1).count();
+        assert_eq!(
+            unbroken,
+            green.len() - 2,
+            "the rows inside a branch touch each other: {gaps:?}"
+        );
+        assert_eq!(
+            breaks, 1,
+            "only the break between the two branches remains: {gaps:?}"
+        );
     }
 }
