@@ -217,6 +217,21 @@ impl App {
         show_tags: bool,
         show_about: bool,
     ) -> Self {
+        // wgpu's default handler panics on every uncaptured error. A second window
+        // reconfigures its surface from a resize event, and the OpenGL backend can lose
+        // the GPU-idle race there; log it and let the painter recover on the next frame.
+        if let Some(render_state) = &cc.wgpu_render_state {
+            let repaint = cc.egui_ctx.clone();
+            render_state
+                .device
+                .on_uncaptured_error(std::sync::Arc::new(move |error| {
+                    eprintln!("wgpu error (continuing): {error}");
+                    // A failed surface configure is recovered by the next paint, which
+                    // reconfigures or recreates the surface it finds out of date.
+                    repaint.request_repaint();
+                }));
+        }
+
         ui::fonts::install(&cc.egui_ctx);
 
         // egui keeps a style per theme and chooses one from the system theme after
