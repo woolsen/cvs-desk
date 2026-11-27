@@ -8,6 +8,33 @@ use cvsdesk::prefs::{ViewScope, ViewState};
 
 use crate::app::{App, RemoteState};
 
+/// A named task view. Each preset is a complete set of filter switches, so selecting
+/// one never leaves a half-applied state behind.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum FilterPreset {
+    WorkingCopy,
+    MyChanges,
+    NeedsAttention,
+    NotCheckedOut,
+    Untracked,
+    AllNames,
+    Custom,
+}
+
+impl FilterPreset {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::WorkingCopy => "Working copy",
+            Self::MyChanges => "My changes",
+            Self::NeedsAttention => "Needs attention",
+            Self::NotCheckedOut => "Not checked out",
+            Self::Untracked => "Untracked",
+            Self::AllNames => "All names",
+            Self::Custom => "Custom",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Filters {
     pub(super) scope: ViewScope,
@@ -212,6 +239,9 @@ impl Filters {
         if !self.missing || self.hide_missing {
             hidden.push("missing locally");
         }
+        if !self.folders {
+            hidden.push("sub-folders");
+        }
         if self.scope == ViewScope::NotCheckedOut {
             hidden.push("working copy (scope)");
         }
@@ -220,6 +250,77 @@ impl Filters {
 
     pub(super) fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    pub(super) fn set_state(&mut self, state: State, on: bool) {
+        match state {
+            State::Folder => self.folders = on,
+            State::Unchanged => self.unchanged = on,
+            State::Modified => self.changed = on,
+            State::Added => self.added = on,
+            State::Removed => self.removed = on,
+            State::Conflict | State::NeedsPatch => self.conflicts = on,
+            State::Unknown => self.unknown = on,
+            State::Missing => self.missing = on,
+            State::Remote => {}
+        }
+    }
+
+    pub(super) fn apply_preset(&mut self, preset: FilterPreset) {
+        let mut filters = Self::default();
+        match preset {
+            FilterPreset::WorkingCopy => {}
+            FilterPreset::MyChanges => {
+                filters.unchanged = false;
+                filters.unknown = false;
+                filters.missing = false;
+                filters.folders = false;
+            }
+            FilterPreset::NeedsAttention => {
+                filters.unchanged = false;
+                filters.changed = false;
+                filters.added = false;
+                filters.removed = false;
+                filters.unknown = false;
+                filters.folders = false;
+            }
+            FilterPreset::NotCheckedOut => {
+                filters.scope = ViewScope::NotCheckedOut;
+            }
+            FilterPreset::Untracked => {
+                filters.unchanged = false;
+                filters.changed = false;
+                filters.added = false;
+                filters.removed = false;
+                filters.conflicts = false;
+                filters.missing = false;
+                filters.folders = false;
+            }
+            FilterPreset::AllNames => {
+                filters.scope = ViewScope::All;
+            }
+            FilterPreset::Custom => return,
+        }
+        *self = filters;
+    }
+
+    /// Which named view the current switches describe, if any.
+    pub(super) fn preset(&self) -> FilterPreset {
+        for preset in [
+            FilterPreset::WorkingCopy,
+            FilterPreset::MyChanges,
+            FilterPreset::NeedsAttention,
+            FilterPreset::NotCheckedOut,
+            FilterPreset::Untracked,
+            FilterPreset::AllNames,
+        ] {
+            let mut candidate = Self::default();
+            candidate.apply_preset(preset);
+            if *self == candidate {
+                return preset;
+            }
+        }
+        FilterPreset::Custom
     }
 }
 
@@ -364,6 +465,29 @@ impl App {
     pub(super) fn refresh_state_sheet(&mut self) {
         self.state_sheet = self.build_state_sheet();
         self.state_dirty = false;
+    }
+
+    /// Counts for the filter menu. Conflicts and Needs Patch share one switch, so their
+    /// counts are added; the other states are counted exactly.
+    pub(super) fn filter_state_counts(&self) -> Vec<(State, usize)> {
+        let local = |state: State| {
+            self.rows
+                .iter()
+                .filter(|row| row.origin == Origin::Local && row.state == state)
+                .count()
+        };
+        vec![
+            (State::Unchanged, local(State::Unchanged)),
+            (State::Modified, local(State::Modified)),
+            (State::Added, local(State::Added)),
+            (State::Removed, local(State::Removed)),
+            (
+                State::Conflict,
+                local(State::Conflict) + local(State::NeedsPatch),
+            ),
+            (State::Unknown, local(State::Unknown)),
+            (State::Missing, local(State::Missing)),
+        ]
     }
 
     pub(super) fn count_states(&self) -> Vec<(State, usize)> {
@@ -737,6 +861,61 @@ mod tests {
         app.order_dirty = true;
         app.ensure_order();
         assert_eq!(app.order, vec![0]);
+    }
+
+    #[test]
+    fn presets_set_the_expected_scope_and_states() {
+        let mut filters = Filters::default();
+        assert_eq!(filters.preset(), FilterPreset::WorkingCopy);
+
+        filters.apply_preset(FilterPreset::MyChanges);
+        assert_eq!(filters.preset(), FilterPreset::MyChanges);
+        assert_eq!(filters.scope, ViewScope::WorkingCopy);
+        assert!(!filters.unchanged);
+        assert!(filters.changed && filters.added && filters.removed && filters.conflicts);
+        assert!(!filters.unknown && !filters.missing && !filters.folders);
+
+        filters.apply_preset(FilterPreset::NotCheckedOut);
+        assert_eq!(filters.preset(), FilterPreset::NotCheckedOut);
+        assert_eq!(filters.scope, ViewScope::NotCheckedOut);
+
+        filters.apply_preset(FilterPreset::AllNames);
+        assert_eq!(filters.preset(), FilterPreset::AllNames);
+        assert_eq!(filters.scope, ViewScope::All);
+    }
+
+    #[test]
+    fn a_custom_filter_is_not_mistaken_for_a_preset() {
+        let mut filters = Filters::default();
+        filters.apply_preset(FilterPreset::Untracked);
+        assert_eq!(filters.preset(), FilterPreset::Untracked);
+
+        filters.unknown = false;
+        assert_eq!(filters.preset(), FilterPreset::Custom);
+    }
+
+    #[test]
+    fn state_switches_share_the_conflict_box() {
+        let mut filters = Filters::default();
+        filters.set_state(State::NeedsPatch, false);
+        assert!(!filters.conflicts);
+
+        filters.set_state(State::Conflict, true);
+        assert!(filters.conflicts);
+    }
+
+    #[test]
+    fn filter_state_counts_combine_conflicts_and_needs_patch() {
+        let mut app = app_with_rows(vec![row("a.txt", false), row("b.txt", false)]);
+        app.rows[0].state = State::Conflict;
+        app.rows[1].state = State::NeedsPatch;
+
+        let counts = app.filter_state_counts();
+        let conflicts = counts
+            .iter()
+            .find(|(state, _)| *state == State::Conflict)
+            .expect("the menu has a conflict count");
+        assert_eq!(conflicts.1, 2);
     }
 
     #[test]

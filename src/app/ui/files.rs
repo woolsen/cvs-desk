@@ -10,7 +10,7 @@ use cvsdesk::prefs::ViewScope;
 use cvsdesk::util::truncate_columns;
 
 use super::{fonts, icons, state_color, typography};
-use crate::app::files::{display_name, search_id, Filters, SortKey};
+use crate::app::files::{display_name, search_id, FilterPreset, Filters, SortKey};
 use crate::app::{App, RemoteState};
 
 /// What a nav-bar button asked for, handled after the row has been drawn.
@@ -517,6 +517,119 @@ impl App {
         }
     }
 
+    /// The task presets and the state switches. One menu, so a preset is always a
+    /// complete view and a manual change immediately reads as `Custom`.
+    fn ui_filter_menu(&mut self, ui: &mut egui::Ui) {
+        let preset = self.filters.preset();
+        let active = self.filters.filtering().len();
+        let label = if active == 0 {
+            format!("Filter: {}", preset.label())
+        } else {
+            format!("Filter: {} ({active})", preset.label())
+        };
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(300.0);
+            ui.label(egui::RichText::new("View").small().weak());
+            for choice in [
+                FilterPreset::WorkingCopy,
+                FilterPreset::MyChanges,
+                FilterPreset::NeedsAttention,
+                FilterPreset::NotCheckedOut,
+                FilterPreset::Untracked,
+                FilterPreset::AllNames,
+            ] {
+                if ui
+                    .selectable_label(preset == choice, choice.label())
+                    .clicked()
+                {
+                    self.filters.apply_preset(choice);
+                    self.order_dirty = true;
+                }
+            }
+
+            ui.separator();
+            ui.label(egui::RichText::new("Scope").small().weak());
+            let (local, remote) = self.scope_counts();
+            for (scope, label, count) in [
+                (ViewScope::WorkingCopy, "Working copy", local),
+                (ViewScope::NotCheckedOut, "Not checked out", remote),
+                (ViewScope::All, "All names", local + remote),
+            ] {
+                if ui
+                    .selectable_label(self.filters.scope == scope, format!("{label} ({count})"))
+                    .clicked()
+                {
+                    self.filters.scope = scope;
+                    self.order_dirty = true;
+                }
+            }
+
+            ui.separator();
+            ui.label(egui::RichText::new("CVS state").small().weak());
+            let local_scope = self.filters.scope != ViewScope::NotCheckedOut;
+            for (state, count) in self.filter_state_counts() {
+                let label = match state {
+                    State::Unchanged => "Up-to-date",
+                    State::Modified => "Modified",
+                    State::Added => "Added",
+                    State::Removed => "Removed",
+                    State::Conflict => "Conflicts",
+                    State::Unknown => "Untracked",
+                    State::Missing => "Missing locally",
+                    _ => state.label(),
+                };
+                let mut on = self.filters.enabled(state);
+                let response = ui.add_enabled(
+                    local_scope,
+                    egui::Checkbox::new(&mut on, format!("{label} ({count})")),
+                );
+                if response.changed() {
+                    self.filters.set_state(state, on);
+                    self.order_dirty = true;
+                }
+            }
+            if !local_scope {
+                ui.label(
+                    egui::RichText::new("Repository names have no local CVS state.")
+                        .small()
+                        .weak(),
+                );
+            }
+
+            ui.separator();
+            let folder_count = self.rows.iter().filter(|row| row.is_dir).count();
+            let mut folders = self.filters.folders;
+            if ui
+                .checkbox(&mut folders, format!("Sub-folders ({folder_count})"))
+                .changed()
+            {
+                self.filters.folders = folders;
+                self.order_dirty = true;
+            }
+            let mut hide_unknown = self.filters.hide_unknown;
+            if ui.checkbox(&mut hide_unknown, "Hide untracked").changed() {
+                self.filters.hide_unknown = hide_unknown;
+                self.order_dirty = true;
+            }
+            let mut hide_missing = self.filters.hide_missing;
+            if ui.checkbox(&mut hide_missing, "Hide missing").changed() {
+                self.filters.hide_missing = hide_missing;
+                self.order_dirty = true;
+            }
+
+            ui.separator();
+            if ui.button("Reset filters").clicked() {
+                self.filters = Filters::default();
+                self.order_dirty = true;
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text(
+            "Task presets and state switches. The list always says which view is active.",
+        );
+    }
+
     /// The scope bar: the one place that says whether the repository side is hidden,
     /// still loading, or unavailable. It sits above the column headings so the source
     /// of the list is always on screen.
@@ -562,6 +675,7 @@ impl App {
             {
                 chosen = Some(ViewScope::All);
             }
+            self.ui_filter_menu(ui);
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("{} of {} rows", self.order.len(), self.rows.len()))
