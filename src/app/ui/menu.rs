@@ -13,6 +13,13 @@ impl App {
         // A folder without a `CVS/Root` has nothing for these commands to act on. They
         // stay visible but greyed, so the reason is on screen instead of in an error.
         let in_project = !self.root.is_empty();
+        let history_ready = self.selected.len() == 1
+            && self
+                .selected
+                .iter()
+                .next()
+                .and_then(|index| self.rows.get(*index))
+                .is_some_and(|row| !row.is_dir && row.origin != cvsdesk::entries::Origin::Remote);
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -218,8 +225,12 @@ impl App {
                             self.open_diff_dialog();
                             ui.close();
                         }
-                        if cmd_item(ui, &Cmd::Log) {
-                            self.cvs_command(Cmd::Log);
+                        if ui
+                            .add_enabled(history_ready, egui::Button::new("File History…"))
+                            .on_hover_text("Select one local file to see its history")
+                            .clicked()
+                        {
+                            self.history_selected();
                             ui.close();
                         }
                         if cmd_item(ui, &Cmd::Status) {
@@ -238,12 +249,8 @@ impl App {
                             self.cvs_command(Cmd::Watchers);
                             ui.close();
                         }
-                        if ui.button("History…").clicked() {
+                        if ui.button("Repository History…").clicked() {
                             self.cvs_command(Cmd::History);
-                            ui.close();
-                        }
-                        if ui.button("Graph…").clicked() {
-                            self.graph_selected();
                             ui.close();
                         }
                     });

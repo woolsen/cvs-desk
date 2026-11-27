@@ -12,9 +12,23 @@ use crate::truncate_columns;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RevNode {
     pub revision: String,
+    /// The date as the graph shows it, `2026-11-22`.
     pub date: String,
+    /// The same date with its time, `2026-11-22 10:04:11`.
+    pub date_time: String,
     pub author: String,
+    /// The message flattened to one line, for the graph's row.
     pub message: String,
+    /// The message as the server printed it, with its line breaks.
+    pub message_full: String,
+    /// `Exp`, `dead`, or whatever the server printed.
+    pub state: String,
+    /// Lines added and removed, when the log reports them.
+    pub lines: Option<(u32, u32)>,
+    /// The child branch revisions named by the `branches:` line.
+    pub branches: Vec<String>,
+    /// Symbolic names pointing at this revision; filled by [`crate::history`].
+    pub tags: Vec<String>,
     pub branch: bool,
 }
 
@@ -127,8 +141,14 @@ pub fn revision_nodes(lines: &[String]) -> Vec<RevNode> {
             cur = Some(RevNode {
                 revision: rev,
                 date: String::new(),
+                date_time: String::new(),
                 author: String::new(),
                 message: String::new(),
+                message_full: String::new(),
+                state: String::new(),
+                lines: None,
+                branches: Vec::new(),
+                tags: Vec::new(),
                 branch,
             });
             continue;
@@ -138,19 +158,41 @@ pub fn revision_nodes(lines: &[String]) -> Vec<RevNode> {
                 for part in t.split(';') {
                     let part = part.trim();
                     if let Some(d) = part.strip_prefix("date:") {
-                        n.date = short_cvs_date(d.trim());
+                        let d = d.trim();
+                        n.date = short_cvs_date(d);
+                        n.date_time = normalized_date_time(d);
                     } else if let Some(a) = part.strip_prefix("author:") {
                         n.author = a.trim().to_string();
+                    } else if let Some(s) = part.strip_prefix("state:") {
+                        n.state = s.trim().to_string();
+                    } else if let Some(l) = part.strip_prefix("lines:") {
+                        n.lines = parse_lines(l.trim());
                     }
                 }
                 continue;
+            }
+            // `branches:` names the child branches of this revision. It sits between the
+            // date and the message, so it must not be read as part of the commit message.
+            // Once the message has started, a line beginning with `branches:` is text.
+            if n.message.is_empty() {
+                if let Some(rest) = t.strip_prefix("branches:") {
+                    n.branches = rest
+                        .split(';')
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    continue;
+                }
             }
             let separator = !t.is_empty() && t.chars().all(|c| c == '-' || c == '=' || c == ' ');
             if !separator && !t.is_empty() {
                 if !n.message.is_empty() {
                     n.message.push(' ');
+                    n.message_full.push('\n');
                 }
                 n.message.push_str(t);
+                n.message_full.push_str(t);
             }
         }
     }
@@ -164,6 +206,30 @@ pub fn revision_nodes(lines: &[String]) -> Vec<RevNode> {
 fn short_cvs_date(d: &str) -> String {
     let d = d.split_whitespace().next().unwrap_or(d);
     d.replace('/', "-")
+}
+
+/// `2026/11/22 09:14:03` → `2026-11-22 09:14:03`.
+fn normalized_date_time(d: &str) -> String {
+    let mut parts = d.split_whitespace();
+    let date = parts.next().unwrap_or("").replace('/', "-");
+    match parts.next() {
+        Some(time) if !date.is_empty() => format!("{} {}", date, time),
+        _ => date,
+    }
+}
+
+/// `lines: +2 -1` (without the `lines:` label) → `(2, 1)`.
+fn parse_lines(value: &str) -> Option<(u32, u32)> {
+    let mut added = None;
+    let mut removed = None;
+    for part in value.split_whitespace() {
+        if let Some(n) = part.strip_prefix('+') {
+            added = n.parse().ok();
+        } else if let Some(n) = part.strip_prefix('-') {
+            removed = n.parse().ok();
+        }
+    }
+    Some((added?, removed?))
 }
 
 /// A short note about the revision set, for the status bar.
@@ -430,8 +496,14 @@ mod tests {
         RevNode {
             revision: revision.into(),
             date: String::new(),
+            date_time: String::new(),
             author: String::new(),
             message: String::new(),
+            message_full: String::new(),
+            state: String::new(),
+            lines: None,
+            branches: Vec::new(),
+            tags: Vec::new(),
             branch,
         }
     }

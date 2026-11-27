@@ -1,6 +1,5 @@
 //! The dialogs: one module per window, with the command its button runs.
 
-use cvsdesk::graph::RevNode;
 use cvsdesk::prefs::Prefs;
 
 use crate::app::{App, OutputKind};
@@ -10,7 +9,7 @@ mod checkout;
 mod command_line;
 mod commit;
 mod diff;
-mod graph;
+pub(super) mod history;
 mod import;
 mod login;
 mod preferences;
@@ -55,10 +54,7 @@ pub(super) enum Dialog {
     CommandLine {
         text: String,
     },
-    Graph {
-        file: String,
-        nodes: Vec<RevNode>,
-    },
+    History(Box<history::HistoryState>),
     About,
 }
 
@@ -76,6 +72,8 @@ pub(super) enum DialogAction {
     SavePrefs,
     RunLine,
     ShowSheet,
+    HistoryRefresh,
+    HistoryRawLog,
 }
 
 impl App {
@@ -86,6 +84,8 @@ impl App {
         let recent_roots = self.prefs.recent_roots.clone();
         let kind_label = self.folder_kind().unwrap_or("").to_string();
         let dir = self.dir.display().to_string();
+        let history_globals = self.prefs.globals();
+        let history_flags = self.prefs.diff_flags();
         let busy = self.runner.running;
         let has_cvs = self.has_cvs;
         let action = {
@@ -136,7 +136,9 @@ impl App {
                 ),
                 Dialog::Preferences { tab, draft } => preferences::show(ctx, tab, draft),
                 Dialog::CommandLine { text } => command_line::show(ctx, text, &cvsroot),
-                Dialog::Graph { file, nodes } => graph::show(ctx, file, nodes),
+                Dialog::History(state) => {
+                    history::show(ctx, state, &history_globals, &history_flags)
+                }
                 Dialog::About => about::show(ctx, &cvsroot, &kind_label, &repository, &dir),
             }
         };
@@ -170,6 +172,30 @@ impl App {
                 self.dialog = None;
                 return;
             }
+            DialogAction::HistoryRefresh => {
+                if let Some(Dialog::History(state)) = self.dialog.as_ref() {
+                    let dir = state.dir().to_path_buf();
+                    let root = state.root().to_string();
+                    let file = state.file().to_string();
+                    let row = (self.dir.as_path() == state.dir())
+                        .then(|| self.rows.iter().find(|row| row.name == file))
+                        .flatten();
+                    let working = row
+                        .map(|row| row.revision.clone())
+                        .unwrap_or_else(|| state.working().to_string());
+                    let working_state = row.map(|row| row.state).unwrap_or(state.working_state());
+                    self.request_history(dir, root, file, working, working_state, true);
+                }
+                return;
+            }
+            DialogAction::HistoryRawLog => {
+                if let Some(Dialog::History(state)) = self.dialog.as_ref() {
+                    self.captured = state.raw().to_vec();
+                }
+                self.output = OutputKind::Log;
+                self.dialog = None;
+                return;
+            }
             _ => {}
         }
         let Some(d) = self.dialog.take() else {
@@ -187,7 +213,9 @@ impl App {
             | DialogAction::ShowSheet
             | DialogAction::TagsCreate
             | DialogAction::TagsDelete
-            | DialogAction::TagsRetry => {}
+            | DialogAction::TagsRetry
+            | DialogAction::HistoryRefresh
+            | DialogAction::HistoryRawLog => {}
         }
     }
 }

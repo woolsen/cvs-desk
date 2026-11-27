@@ -147,6 +147,7 @@ access list:
 symbolic names:
 \trelease_1_4: 1.4
 \tvendor_acme: 1.2.4
+\tfeature_x: 1.3.0.2
 keyword substitution: kv
 total revisions: 8
 =============================================================================

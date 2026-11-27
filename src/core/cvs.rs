@@ -129,7 +129,7 @@ impl Cmd {
             Cmd::Logout => "Logout",
             Cmd::Export => "Export…",
             Cmd::Admin => "Admin…",
-            Cmd::History => "History…",
+            Cmd::History => "Repository History…",
             Cmd::Rdiff => "Patch (rdiff)",
         }
     }

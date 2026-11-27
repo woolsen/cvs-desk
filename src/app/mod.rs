@@ -8,9 +8,9 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use cvsdesk::cvs::{Msg, Runner};
 use cvsdesk::demo;
 use cvsdesk::entries::{self, Row, State};
-use cvsdesk::graph::revision_nodes;
 use cvsdesk::prefs::Prefs;
 
+use crate::app::dialogs::history::HistoryState;
 use crate::app::dialogs::tags::TagsState;
 use crate::app::dialogs::Dialog;
 use crate::app::files::{Filters, SortKey};
@@ -19,6 +19,7 @@ use crate::app::shot::ShotJob;
 mod actions;
 mod dialogs;
 mod files;
+mod history_preview;
 mod nav;
 mod remote;
 mod shot;
@@ -50,7 +51,7 @@ impl OutputKind {
             OutputKind::Diff => "Diff",
             OutputKind::Status => "Status",
             OutputKind::Annotate => "Annotate",
-            OutputKind::History => "History",
+            OutputKind::History => "Repository History",
             OutputKind::Editors => "Editors & Watchers",
         }
     }
@@ -63,6 +64,17 @@ pub(super) enum TagWait {
     Query,
     /// A create or delete command: when it ends, read the tags again.
     AfterWrite,
+}
+
+/// The file whose log reply will fill the File History window.
+pub(super) struct HistoryWait {
+    pub dir: PathBuf,
+    pub root: String,
+    pub file: String,
+    pub working: String,
+    pub working_state: State,
+    /// True when an open File History window asked for a refresh.
+    pub refresh: bool,
 }
 
 /// Something that stopped a command, kept so the status bar can show it.
@@ -154,9 +166,9 @@ pub(crate) struct App {
     checkout_waiting: Option<PathBuf>,
     pending: Vec<String>,
     captured: Vec<String>,
-    /// The file whose `cvs log` was asked for the graph window. When the command finishes,
-    /// the captured log is parsed and the graph dialog opens.
-    graph_waiting: Option<String>,
+    /// The file whose `cvs log` was asked for the File History window. When the command
+    /// finishes, the captured log is parsed and the window opens or refreshes.
+    history_waiting: Option<HistoryWait>,
     /// What the Tags window asked cvs for. Cleared when the window closes.
     tag_waiting: Option<TagWait>,
     output: OutputKind,
@@ -181,7 +193,7 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         start: Option<PathBuf>,
         shot: Option<String>,
-        show_graph: bool,
+        show_history: bool,
         show_prefs: bool,
         show_tags: bool,
         show_about: bool,
@@ -245,7 +257,7 @@ impl App {
             checkout_waiting: None,
             pending: Vec::new(),
             captured: Vec::new(),
-            graph_waiting: None,
+            history_waiting: None,
             tag_waiting: None,
             output: OutputKind::Console,
             output_selection: None,
@@ -267,13 +279,18 @@ impl App {
         app.runner
             .lines
             .push(format!("Working folder: {}", app.dir.display()));
-        if show_graph {
+        if show_history {
             let log: Vec<String> = demo::SAMPLE_LOG.lines().map(|l| l.to_string()).collect();
-            app.dialog = Some(Dialog::Graph {
-                file: "main.c".into(),
-                nodes: revision_nodes(&log),
-            });
-            app.status = "Graph of a saved cvs log reply".into();
+            let history = cvsdesk::history::History::parse("main.c", &log);
+            app.dialog = Some(Dialog::History(Box::new(HistoryState::demo(
+                app.dir.clone(),
+                app.root.clone(),
+                "main.c".into(),
+                "1.5".into(),
+                history,
+                log,
+            ))));
+            app.status = "File History of a saved cvs log reply".into();
         }
         if show_prefs {
             app.dialog = Some(Dialog::Preferences {

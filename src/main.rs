@@ -27,7 +27,7 @@ fn window_icon() -> Option<egui::IconData> {
 fn main() -> eframe::Result<()> {
     let mut shot: Option<String> = None;
     let mut start: Option<PathBuf> = None;
-    let mut show_graph = false;
+    let mut show_history = false;
     let mut show_prefs = false;
     let mut show_tags = false;
     let mut show_about = false;
@@ -44,10 +44,10 @@ fn main() -> eframe::Result<()> {
                     i += 1;
                 }
             }
-            // Show the Graph pane filled from a saved `cvs log` reply, so the drawing can be
-            // looked at on a machine with no CVS server. It shows nothing but what a real
-            // `cvs log` prints.
-            "--show-graph" => show_graph = true,
+            // Show the File History window filled from a saved `cvs log` reply, so it can
+            // be looked at on a machine with no CVS server. It shows nothing but what a
+            // real `cvs log` prints.
+            "--show-graph" | "--show-history" => show_history = true,
             // Open the Preferences dialog at startup, so a check can photograph it.
             "--show-prefs" => show_prefs = true,
             // Open the Tags window filled from a saved `cvs log -h` reply.
@@ -112,7 +112,7 @@ fn main() -> eframe::Result<()> {
                 cc,
                 start_for_app.clone(),
                 shot_for_app.clone(),
-                show_graph,
+                show_history,
                 show_prefs,
                 show_tags,
                 show_about,

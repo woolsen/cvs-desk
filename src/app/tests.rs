@@ -15,7 +15,7 @@ use cvsdesk::tags::TagInfo;
 use super::dialogs::tags::TagsState;
 use super::dialogs::Dialog;
 use super::files::{Filters, SortKey};
-use super::{App, OutputKind, TagWait, Trouble};
+use super::{App, HistoryWait, OutputKind, TagWait, Trouble};
 
 pub(super) fn row(name: &str, is_dir: bool) -> Row {
     Row {
@@ -74,7 +74,7 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         checkout_waiting: None,
         pending: Vec::new(),
         captured: Vec::new(),
-        graph_waiting: None,
+        history_waiting: None,
         tag_waiting: None,
         output: OutputKind::Console,
         output_selection: None,
@@ -681,27 +681,34 @@ fn a_query_command_leaves_the_rows_and_selection_alone() {
 }
 
 #[test]
-fn the_graph_entry_needs_one_file() {
+fn the_file_history_entry_needs_one_file() {
     let mut app = app_with_rows(vec![
         row("a.txt", false),
         row("b.txt", false),
         row("sub", true),
     ]);
     app.selected = HashSet::from([0, 1]);
-    app.graph_selected();
-    assert!(app.graph_waiting.is_none());
+    app.history_selected();
+    assert!(app.history_waiting.is_none());
     assert!(app.status.contains("one file"));
 
     app.selected = HashSet::from([2]);
-    app.graph_selected();
-    assert!(app.graph_waiting.is_none());
+    app.history_selected();
+    assert!(app.history_waiting.is_none());
     assert!(app.status.contains("not a folder"));
 }
 
 #[test]
-fn a_finished_graph_log_opens_the_graph_window() {
+fn a_finished_history_log_opens_the_history_window() {
     let mut app = app_with_rows(Vec::new());
-    app.graph_waiting = Some("main.c".into());
+    app.history_waiting = Some(HistoryWait {
+        dir: app.dir.clone(),
+        root: app.root.clone(),
+        file: "main.c".into(),
+        working: "1.2".into(),
+        working_state: State::Unchanged,
+        refresh: false,
+    });
 
     let (tx, rx) = channel();
     app.rx = Some(rx);
@@ -715,15 +722,11 @@ fn a_finished_graph_log_opens_the_graph_window() {
     app.poll();
 
     match app.dialog {
-        Some(Dialog::Graph {
-            ref file,
-            ref nodes,
-        }) => {
-            assert_eq!(file, "main.c");
-            assert_eq!(nodes.len(), 1);
-            assert_eq!(nodes[0].revision, "1.2");
+        Some(Dialog::History(ref state)) => {
+            assert_eq!(state.file(), "main.c");
+            assert_eq!(state.revision_count(), 1);
         }
-        _ => panic!("the finished log should open the graph window"),
+        _ => panic!("the finished log should open the File History window"),
     }
 }
 

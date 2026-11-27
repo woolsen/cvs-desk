@@ -6,6 +6,7 @@ pub mod demo;
 pub mod entries;
 pub mod filekind;
 pub mod graph;
+pub mod history;
 pub mod prefs;
 pub mod remote;
 pub mod tags;

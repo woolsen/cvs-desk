@@ -1,22 +1,31 @@
 //! Running cvs, polling its output, and the actions the menus call.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
 use cvsdesk::cvs::{Cmd, CommandRequest, Msg};
 use cvsdesk::cvs_client::work::codec;
 use cvsdesk::cvs_client::work::entries::Entries;
 use cvsdesk::entries::{self, State};
-use cvsdesk::graph::revision_nodes;
+use cvsdesk::history::History;
 
+use crate::app::dialogs::history::HistoryState;
 use crate::app::dialogs::tags::TagsState;
 use crate::app::dialogs::Dialog;
-use crate::app::{App, OutputKind, TagWait, Trouble};
+use crate::app::{App, HistoryWait, OutputKind, TagWait, Trouble};
 
 impl App {
     // -- running commands ---------------------------------------------------
 
-    pub(super) fn start(&mut self, mut req: CommandRequest, kind: OutputKind) -> bool {
+    pub(super) fn start(&mut self, req: CommandRequest, kind: OutputKind) -> bool {
+        self.start_in(self.dir.clone(), req, kind)
+    }
+
+    /// Start one command in `dir` instead of the folder the window is showing. File
+    /// History keeps the folder it was opened from, so browsing elsewhere must not
+    /// change where its refresh or diff preview runs.
+    fn start_in(&mut self, dir: PathBuf, mut req: CommandRequest, kind: OutputKind) -> bool {
         if self.runner.running {
             self.runner
                 .lines
@@ -27,7 +36,7 @@ impl App {
         }
         self.trouble = None;
         self.stop_requested = false;
-        self.graph_waiting = None;
+        self.history_waiting = None;
         self.checkout_waiting = None;
         req.prune = self.prefs.prune;
         let password = req.password.clone();
@@ -40,7 +49,6 @@ impl App {
         self.output = kind;
         let (tx, rx) = channel();
         self.rx = Some(rx);
-        let dir = self.dir.clone();
         let refresh = req.refresh || req.cmd.changes_working_copy();
         let started = self.runner.start(&dir, args, password, line, move |m| {
             let _ = tx.send(m);
@@ -79,7 +87,7 @@ impl App {
 
     pub(super) fn open_commit_dialog(&mut self, text: String) {
         if self.selection_is_all_remote() {
-            self.status = "The selected rows are only on the server; check them out first".into();
+            self.status = "The selected rows are not checked out; check them out first".into();
             return;
         }
         self.open_dialog(Dialog::Commit {
@@ -91,7 +99,7 @@ impl App {
 
     pub(super) fn open_diff_dialog(&mut self) {
         if self.selection_is_all_remote() {
-            self.status = "The selected rows are only on the server; check them out first".into();
+            self.status = "The selected rows are not checked out; check them out first".into();
             return;
         }
         self.open_dialog(Dialog::Diff {
@@ -105,7 +113,7 @@ impl App {
 
     pub(super) fn cvs_command(&mut self, cmd: Cmd) {
         if self.selection_is_all_remote() {
-            self.status = "The selected rows are only on the server; check them out first".into();
+            self.status = "The selected rows are not checked out; check them out first".into();
             return;
         }
         let files = self.selected_local_names();
@@ -136,8 +144,21 @@ impl App {
         self.start(CommandRequest::new(Cmd::Update), OutputKind::Console);
     }
 
-    /// Read one file's log and open the graph window when the reply arrives.
-    pub(super) fn request_graph(&mut self, file: String) {
+    /// Read one file's log and open or refresh the File History window when the reply
+    /// arrives. The bottom pane keeps whatever the user was reading.
+    pub(super) fn request_history(
+        &mut self,
+        dir: PathBuf,
+        root: String,
+        file: String,
+        working: String,
+        working_state: State,
+        refresh: bool,
+    ) {
+        if root.trim().is_empty() {
+            self.status = "This folder is not a CVS working copy".into();
+            return;
+        }
         if self.runner.running {
             self.runner
                 .lines
@@ -148,14 +169,33 @@ impl App {
         }
         let mut req = CommandRequest::new(Cmd::Log);
         req.files = vec![file.clone()];
-        self.start(req, OutputKind::Log);
-        self.graph_waiting = Some(file);
+        req.root = Some(root.clone());
+        let previous = self.output;
+        if !self.start_in(dir.clone(), req, OutputKind::Log) {
+            return;
+        }
+        self.output = previous;
+        if refresh {
+            if let Some(Dialog::History(state)) = self.dialog.as_mut() {
+                state.set_error(String::new());
+                state.set_loading(true);
+            }
+        }
+        self.status = format!("Reading history of {}", file);
+        self.history_waiting = Some(HistoryWait {
+            dir,
+            root,
+            file,
+            working,
+            working_state,
+            refresh,
+        });
     }
 
-    /// The Query > Graph entry: it needs exactly one selected file.
-    pub(super) fn graph_selected(&mut self) {
+    /// The Query > File History entry: it needs exactly one selected file.
+    pub(super) fn history_selected(&mut self) {
         if self.selected.len() != 1 {
-            self.status = "Select one file to see its graph".into();
+            self.status = "Select one file to see its history".into();
             return;
         }
         let Some(&index) = self.selected.iter().next() else {
@@ -165,14 +205,21 @@ impl App {
             return;
         };
         if row.is_dir {
-            self.status = "Graph needs a file, not a folder".into();
+            self.status = "File History needs a file, not a folder".into();
             return;
         }
         if row.origin == cvsdesk::entries::Origin::Remote {
-            self.status = "The selected file is only on the server; check it out first".into();
+            self.status = "The selected file is not checked out; check it out first".into();
             return;
         }
-        self.request_graph(row.name.clone());
+        self.request_history(
+            self.dir.clone(),
+            self.root.clone(),
+            row.name.clone(),
+            row.revision.clone(),
+            row.state,
+            false,
+        );
     }
 
     /// Open the Tags window for the selected items, or for the current folder when
@@ -187,7 +234,7 @@ impl App {
             return;
         }
         if self.selection_is_all_remote() {
-            self.status = "The selected rows are only on the server; check them out first".into();
+            self.status = "The selected rows are not checked out; check them out first".into();
             return;
         }
         let scope = self.selected_local_names();
@@ -275,12 +322,45 @@ impl App {
                     moved = true;
                 }
             }
-            if let Some(file) = self.graph_waiting.take() {
-                let nodes = revision_nodes(&self.captured);
-                if nodes.is_empty() {
-                    self.status = format!("No revisions to graph for {}", file);
+            if let Some(wait) = self.history_waiting.take() {
+                let history = History::parse(&wait.file, &self.captured);
+                let error = first_error(&self.captured);
+                if history.revisions.is_empty() {
+                    let message = if error.is_empty() {
+                        "No revisions returned".to_string()
+                    } else {
+                        error
+                    };
+                    if wait.refresh {
+                        if let Some(Dialog::History(state)) = self.dialog.as_mut() {
+                            if state.file() == wait.file {
+                                state.set_error(message);
+                            }
+                        }
+                    } else {
+                        self.status = format!("No history for {}: {}", wait.file, message);
+                    }
+                } else if wait.refresh {
+                    if let Some(Dialog::History(state)) = self.dialog.as_mut() {
+                        if state.file() == wait.file {
+                            state.replace_history(
+                                history,
+                                wait.working,
+                                wait.working_state,
+                                self.captured.clone(),
+                            );
+                        }
+                    }
                 } else {
-                    self.open_dialog(Dialog::Graph { file, nodes });
+                    self.open_dialog(Dialog::History(Box::new(HistoryState::new(
+                        wait.dir,
+                        wait.root,
+                        wait.file,
+                        wait.working,
+                        wait.working_state,
+                        history,
+                        self.captured.clone(),
+                    ))));
                 }
             }
             // Capture the flag before a tag refresh query overwrites it: the create or
@@ -352,12 +432,18 @@ impl App {
         // A stop the user asked for is not a failure: note it, and keep Msg::Done from
         // reporting the killed process's exit code as a non-zero error.
         let was_running = self.runner.running;
-        self.graph_waiting = None;
+        let was_history = self.history_waiting.is_some();
+        self.history_waiting = None;
         self.tag_waiting = None;
         self.checkout_waiting = None;
         if let Some(Dialog::Tags(state)) = self.dialog.as_mut() {
             state.loading = false;
             state.status = "Stopped.".into();
+        }
+        if was_history {
+            if let Some(Dialog::History(state)) = self.dialog.as_mut() {
+                state.set_error("Stopped.".into());
+            }
         }
         self.runner.stop();
         self.stop_requested = was_running;
@@ -420,7 +506,7 @@ impl App {
 
     pub(super) fn edit_selected(&mut self) {
         if self.selection_is_all_remote() {
-            self.status = "The selected file is only on the server; check it out first".into();
+            self.status = "The selected file is not checked out; check it out first".into();
             return;
         }
         let names = self.selected_local_names();
@@ -436,7 +522,7 @@ impl App {
 
     pub(super) fn checked_out_edit(&mut self) {
         if self.selection_is_all_remote() {
-            self.status = "The selected rows are only on the server; check them out first".into();
+            self.status = "The selected rows are not checked out; check them out first".into();
             return;
         }
         let files = self.selected_local_names();
@@ -484,7 +570,7 @@ impl App {
     pub(super) fn move_to_trash(&mut self) {
         if self.selection_is_all_remote() {
             self.status =
-                "The selected rows are only on the server; nothing local to delete".into();
+                "The selected rows are not checked out; nothing local to delete".into();
             return;
         }
         let names = self.selected_local_names();

@@ -10,6 +10,7 @@
 //! | [`cvs`] | building `cvs` command lines and running the program |
 //! | [`prefs`] | the settings, kept in one text file beside the program |
 //! | [`graph`] | reading `cvs log` and drawing a file's revisions |
+//! | [`history`] | a file's full log: tags, branches, previous revisions |
 //! | [`demo`] | a sample working folder, so the program can be tried with no server |
 //! | [`util`] | small shared helpers |
 //! | [`client`] | the `cvs` command-line client this project also builds |
@@ -28,6 +29,7 @@ pub use core::demo;
 pub use core::entries;
 pub use core::filekind;
 pub use core::graph;
+pub use core::history;
 pub use core::prefs;
 pub use core::remote;
 pub use core::tags;

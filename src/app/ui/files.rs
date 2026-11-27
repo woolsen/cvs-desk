@@ -29,8 +29,7 @@ enum FileMenuAction {
     Update,
     Commit,
     Diff,
-    Log,
-    Graph,
+    History,
     Tags,
     Status,
     CopyName,
@@ -576,8 +575,9 @@ impl App {
                             pick(ui, "Update", FileMenuAction::Update);
                             pick(ui, "Commit…", FileMenuAction::Commit);
                             pick(ui, "Diff", FileMenuAction::Diff);
-                            pick(ui, "Log", FileMenuAction::Log);
-                            pick(ui, "Graph…", FileMenuAction::Graph);
+                            if !r.is_dir {
+                                pick(ui, "File History…", FileMenuAction::History);
+                            }
                             pick(ui, "Tags…", FileMenuAction::Tags);
                             pick(ui, "Status", FileMenuAction::Status);
                         }
@@ -749,13 +749,12 @@ impl App {
             FileMenuAction::Diff => {
                 self.open_diff_dialog();
             }
-            FileMenuAction::Log => self.cvs_command(Cmd::Log),
-            FileMenuAction::Graph => {
+            FileMenuAction::History => {
                 let Some(row) = self.rows.get(index) else {
                     return;
                 };
                 if row.is_dir {
-                    self.status = "Graph needs a file, not a folder".into();
+                    self.status = "File History needs a file, not a folder".into();
                     return;
                 }
                 if row.origin == Origin::Remote {
@@ -764,7 +763,16 @@ impl App {
                     return;
                 }
                 let name = row.name.clone();
-                self.request_graph(name);
+                let revision = row.revision.clone();
+                let state = row.state;
+                self.request_history(
+                    self.dir.clone(),
+                    self.root.clone(),
+                    name,
+                    revision,
+                    state,
+                    false,
+                );
             }
             FileMenuAction::Tags => self.open_tags(),
             FileMenuAction::Status => self.cvs_command(Cmd::Status),
@@ -1319,8 +1327,7 @@ mod tests {
             "Update",
             "Commit…",
             "Diff",
-            "Log",
-            "Graph…",
+            "File History…",
             "Status",
             "Copy name",
             "Copy full path",
