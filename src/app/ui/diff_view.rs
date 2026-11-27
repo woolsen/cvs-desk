@@ -91,13 +91,22 @@ impl DiffView {
         }
 
         let row_h = row_height(ui);
-        let body_h = (ui.available_height() - SCROLLBAR_H).max(60.0);
+
+        // Reserve all the remaining height in one exact rectangle and draw both the
+        // scroll area and the horizontal bar inside it. If the body reports even a
+        // few points more than the space it was given, egui's `Resize` treats the
+        // content as too tall and grows the window back a little every frame, which
+        // is what made a shrunken diff window slowly expand again.
+        let (body_rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        let mut body = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
+        let bar_gap = body.spacing().item_spacing.y;
+        let body_h = (body_rect.height() - SCROLLBAR_H - bar_gap).max(1.0);
 
         egui::ScrollArea::vertical()
             .id_salt("side_by_side_diff")
             .auto_shrink([false, false])
             .max_height(body_h)
-            .show_viewport(ui, |ui, viewport| {
+            .show_viewport(&mut body, |ui, viewport| {
                 let width = ui.available_width();
                 let total_h = model.rows.len() as f32 * row_h;
                 let (content, _) =
@@ -192,13 +201,13 @@ impl DiffView {
 
         // The two columns share one offset. The maximum is driven by the wider side;
         // the visible width by the narrower code area.
-        let (left_w, right_w) = code_widths(ui.available_width(), self.split, model);
+        let (left_w, right_w) = code_widths(body_rect.width(), self.split, model);
         let visible = left_w.min(right_w).max(1.0);
         let cache = self.cache.as_ref().expect("the cache was built above");
         let max_width = cache.left.max_width.max(cache.right.max_width);
         let max_offset = (max_width - visible).max(0.0);
         self.hscroll = self.hscroll.clamp(0.0, max_offset);
-        horizontal_bar(ui, &mut self.hscroll, max_offset, visible);
+        horizontal_bar(&mut body, &mut self.hscroll, max_offset, visible);
     }
 
     fn header(&mut self, ui: &mut egui::Ui, model: &DiffModel) {
@@ -834,6 +843,51 @@ mod tests {
                 .iter()
                 .any(|text| text == "\\ No newline at end of file"),
             "the view hid the missing final newline: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_shrunken_diff_window_does_not_grow_back() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut old = String::new();
+        let mut new = String::new();
+        for index in 0..200 {
+            old.push_str(&format!("line {index}\n"));
+            if index % 2 == 0 {
+                new.push_str(&format!("line {index}\n"));
+            } else {
+                new.push_str(&format!("changed {index}\n"));
+            }
+        }
+        let model = model(&old, &new);
+        let mut view = DiffView::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 800.0),
+        ));
+        let mut heights = Vec::new();
+        for frame in 0..8 {
+            input.time = Some(frame as f64 * 0.016);
+            let mut height = 0.0;
+            let _ = crate::app::ui::test_run(&ctx, input.clone(), |ui| {
+                let ctx = ui.ctx().clone();
+                let window = egui::Window::new("Diff")
+                    .id(egui::Id::unique("diff_growth_test"))
+                    .resizable(true)
+                    .default_size(egui::vec2(900.0, 300.0))
+                    .min_size(egui::vec2(400.0, 120.0))
+                    .show(&ctx, |ui| view.show(ui, &model, 1));
+                height = window.unwrap().response.rect.height();
+            });
+            heights.push(height);
+        }
+        let settled = heights[2];
+        let last = *heights.last().unwrap();
+        assert!(
+            (last - settled).abs() < 0.5,
+            "the window kept growing after it was sized: {heights:?}"
         );
     }
 

@@ -77,11 +77,9 @@ impl Loader {
         std::thread::spawn(move || {
             let result = load_pair(&dir, &root, &globals, &file, &left, &right, &worker_cancel);
             let msg = match result {
-                Ok(pair) if !worker_cancel.is_cancelled() => Msg::Ready(Box::new(DiffModel::build(
-                    pair.left,
-                    pair.right,
-                    DiffOptions::default(),
-                ))),
+                Ok(pair) if !worker_cancel.is_cancelled() => Msg::Ready(Box::new(
+                    DiffModel::build(pair.left, pair.right, DiffOptions::default()),
+                )),
                 Ok(_) => Msg::Failed("the diff preview stopped".to_string()),
                 Err(_) if worker_cancel.is_cancelled() => {
                     Msg::Failed("the diff preview stopped".to_string())
