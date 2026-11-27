@@ -367,7 +367,10 @@ Index: b.c
                 .count(),
             3
         );
-        assert_eq!(diff.len(), diff.files.iter().map(|f| f.lines.len()).sum());
+        assert_eq!(
+            diff.len(),
+            diff.files.iter().map(|f| f.lines.len()).sum::<usize>()
+        );
     }
 
     #[test]

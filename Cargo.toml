@@ -45,6 +45,9 @@ flate2 = "1"
 # The settings file is TOML: the standard crate keeps hand edits and the program's own
 # escaping and lists in agreement.
 toml = "1.2"
+# The log facade. eframe, wgpu and this program all report through it; `core::diag`
+# installs the one writer that puts those lines in a file.
+log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 # Reads the message font and FontLink; safe bindings only.

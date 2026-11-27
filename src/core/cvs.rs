@@ -49,7 +49,7 @@ impl Default for Cmd {
 }
 
 impl Cmd {
-    fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Cmd::Update => "update",
             Cmd::QueryUpdate => "update",

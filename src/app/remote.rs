@@ -28,6 +28,8 @@ pub(super) struct Loader {
     pub(super) rx: Receiver<Msg>,
     pub(super) repo: String,
     pub(super) seq: u64,
+    /// When the listing started, so its closing log line can say how long it took.
+    started: Instant,
     cancel: CancelToken,
 }
 
@@ -38,6 +40,7 @@ impl Loader {
         let worker_cancel = cancel.clone();
         let dir = dir.to_path_buf();
         let command_repo = repo.to_string();
+        log::debug!(target: "cvsdesk::remote", "phase=start");
 
         std::thread::spawn(move || {
             let mut sink = RemoteSink { tx };
@@ -65,6 +68,7 @@ impl Loader {
             rx,
             repo: repo.to_string(),
             seq,
+            started: Instant::now(),
             cancel,
         }
     }
@@ -453,6 +457,8 @@ impl App {
         };
 
         let loader = self.remote.take().expect("the loader was just borrowed");
+        let elapsed = loader.started.elapsed().as_millis();
+        let line_count = self.remote_lines.len();
         let root_path = entries::parse_cvsroot(&self.root).4;
         let listing = self
             .remote_parser
@@ -465,19 +471,45 @@ impl App {
             Ok(0) => {
                 let error = cvsdesk::remote::error_line(&self.remote_lines).map(str::to_string);
                 if let Some(error) = error {
+                    log::warn!(
+                        target: "cvsdesk::remote",
+                        "phase=end code=0 result=cvs-error lines={} elapsed_ms={}",
+                        line_count,
+                        elapsed
+                    );
                     self.flush_remote_pending();
                     self.remote_state = RemoteState::Failed;
                     self.status = format!("Server list unavailable: {}", error);
                 } else {
+                    log::info!(
+                        target: "cvsdesk::remote",
+                        "phase=end code=0 found={} lines={} elapsed_ms={}",
+                        self.remote_found,
+                        line_count,
+                        elapsed
+                    );
                     self.apply_remote_listing(listing);
                 }
             }
             Ok(code) => {
+                log::warn!(
+                    target: "cvsdesk::remote",
+                    "phase=end code={} result=error lines={} elapsed_ms={}",
+                    code,
+                    line_count,
+                    elapsed
+                );
                 self.flush_remote_pending();
                 self.remote_state = RemoteState::Failed;
                 self.status = format!("Server list unavailable (cvs returned {})", code);
             }
             Err(error) => {
+                log::warn!(
+                    target: "cvsdesk::remote",
+                    "phase=end result=engine-error lines={} elapsed_ms={}",
+                    line_count,
+                    elapsed
+                );
                 self.flush_remote_pending();
                 self.remote_state = RemoteState::Failed;
                 self.status = format!("Server list unavailable: {}", error);

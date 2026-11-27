@@ -38,6 +38,7 @@ impl App {
                 )
                 .is_ok();
                 if !ok {
+                    log::warn!(target: "cvsdesk::shot", "phase=save result=error");
                     eprintln!("could not save {}", job.path.display());
                 }
             }

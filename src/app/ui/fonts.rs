@@ -187,7 +187,27 @@ pub fn icon_font(size: f32) -> egui::FontId {
 
 /// Hands the window its fonts: the platform's UI face and the bundled mono.
 pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(definitions(resolve()));
+    let plan = resolve();
+    match &plan {
+        Some(plan) => log::info!(
+            target: "cvsdesk::fonts",
+            "ui={} cjk={} mono={}",
+            cvsdesk::diag::scalar(&plan.ui.family),
+            plan.cjk
+                .as_ref()
+                .map(|cjk| cvsdesk::diag::scalar(&cjk.family))
+                .unwrap_or_else(|| "none".to_string()),
+            plan.mono
+                .as_ref()
+                .map(|mono| cvsdesk::diag::scalar(&mono.family))
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        None => log::warn!(
+            target: "cvsdesk::fonts",
+            "result=no-platform-font"
+        ),
+    }
+    ctx.set_fonts(definitions(plan));
 }
 
 /// The font set egui draws with. `plan` is what the platform answered; the bundled mono

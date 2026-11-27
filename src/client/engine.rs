@@ -145,8 +145,24 @@ pub fn run(req: Request, sink: &mut dyn Sink, cancel: &CancelToken) -> Result<i3
     if cancel.is_cancelled() {
         return Err(Error::interrupted("cvs"));
     }
-    let (opts, invocation) = cli::parse_args(&req.args)?;
+    let (opts, invocation) = match cli::parse_args(&req.args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::client",
+                "phase=parse result=error interrupted={}",
+                error.is_interrupted()
+            );
+            return Err(error);
+        }
+    };
     let name = invocation_name(&invocation).to_string();
+    log::debug!(
+        target: "cvsdesk::client",
+        "phase=run cmd={} args={}",
+        name,
+        req.args.len()
+    );
     let result = match invocation {
         Invocation::Version => {
             sink.out(cli::banner());
@@ -188,6 +204,20 @@ pub fn run(req: Request, sink: &mut dyn Sink, cancel: &CancelToken) -> Result<i3
     // server answered a cancelled request. The stop wins either way.
     if cancel.is_cancelled() {
         return Err(Error::interrupted(&name));
+    }
+    match &result {
+        Ok(code) => log::debug!(
+            target: "cvsdesk::client",
+            "phase=done cmd={} code={}",
+            name,
+            code
+        ),
+        Err(error) => log::debug!(
+            target: "cvsdesk::client",
+            "phase=done cmd={} result=error interrupted={}",
+            name,
+            error.is_interrupted()
+        ),
     }
     result
 }
@@ -260,15 +290,29 @@ fn run_command(
                     },
                 },
             };
+            log::info!(
+                target: "cvsdesk::login",
+                "phase=auth mode={}",
+                if verify_only { "verify" } else { "save" }
+            );
             if !login_handshake(&root, &password, verify_only, cancel, sink)? {
+                log::warn!(target: "cvsdesk::login", "phase=auth result=rejected");
                 return Ok(1);
             }
+            log::info!(target: "cvsdesk::login", "phase=auth result=ok");
             if !root.options.no_execute {
                 if passfile::passfile_path().is_none() {
+                    log::warn!(target: "cvsdesk::login", "phase=save result=no-home");
                     return Err(Error::aborted("login", "could not find out home directory"));
                 }
                 let mut warn = |line: String| sink.err(format!("cvs login: {}", line));
-                passfile::set_password_with(&root.key, &password, &mut warn)?;
+                match passfile::set_password_with(&root.key, &password, &mut warn) {
+                    Ok(_) => log::info!(target: "cvsdesk::login", "phase=save result=ok"),
+                    Err(error) => {
+                        log::warn!(target: "cvsdesk::login", "phase=save result=error");
+                        return Err(error);
+                    }
+                }
             }
             Ok(0)
         }
@@ -296,11 +340,15 @@ fn run_command(
                 ));
             }
             match passfile::remove_password(&root.key) {
-                passfile::RemoveOutcome::Removed => {}
+                passfile::RemoveOutcome::Removed => {
+                    log::info!(target: "cvsdesk::login", "phase=logout result=removed");
+                }
                 passfile::RemoveOutcome::NotFound => {
+                    log::info!(target: "cvsdesk::login", "phase=logout result=not-found");
                     sink.err("cvs logout: Entry not found.".to_string());
                 }
                 passfile::RemoveOutcome::Missing => {
+                    log::warn!(target: "cvsdesk::login", "phase=logout result=missing");
                     if let Some(path) = passfile::passfile_path() {
                         sink.err(format!(
                             "cvs logout: warning: failed to open {} for reading",
@@ -310,6 +358,7 @@ fn run_command(
                     sink.err("cvs logout: Entry not found.".to_string());
                 }
                 passfile::RemoveOutcome::Unreadable(error) => {
+                    log::warn!(target: "cvsdesk::login", "phase=logout result=unreadable");
                     if let Some(path) = passfile::passfile_path() {
                         sink.err(format!(
                             "cvs logout: warning: failed to open {} for reading: {}",

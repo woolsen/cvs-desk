@@ -333,6 +333,16 @@ impl App {
                 });
 
                 ui.menu_button("Help", |ui| {
+                    if ui.button("Open Log Folder").clicked() {
+                        self.open_log_folder();
+                        ui.close();
+                    }
+                    if ui.button("Copy Diagnostics").clicked() {
+                        ui.ctx().copy_text(cvsdesk::diag::diagnostics_tail(120));
+                        self.status = "Diagnostics copied to the clipboard".into();
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("About").clicked() {
                         self.open_dialog(Dialog::About);
                         ui.close();

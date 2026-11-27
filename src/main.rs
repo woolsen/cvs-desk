@@ -68,6 +68,16 @@ fn prefer_opengl(
     adapters: &[eframe::wgpu::Adapter],
     surface: Option<&eframe::wgpu::Surface<'_>>,
 ) -> Result<eframe::wgpu::Adapter, String> {
+    for adapter in adapters {
+        let info = adapter.get_info();
+        log::debug!(
+            target: "cvsdesk::gpu",
+            "candidate name={} backend={:?} type={:?}",
+            cvsdesk::diag::scalar(&info.name),
+            info.backend,
+            info.device_type
+        );
+    }
     let fits = |adapter: &&eframe::wgpu::Adapter| {
         surface.map_or(true, |surface| adapter.is_surface_supported(surface))
     };
@@ -81,8 +91,20 @@ fn prefer_opengl(
                 .find(|adapter| adapter.get_info().device_type != eframe::wgpu::DeviceType::Cpu)
         })
         .or_else(|| usable.first());
-    pick.map(|adapter| (*adapter).clone())
-        .ok_or_else(|| "no adapter can draw this window".to_owned())
+    let picked = pick.map(|adapter| (*adapter).clone());
+    if let Some(adapter) = &picked {
+        let info = adapter.get_info();
+        log::info!(
+            target: "cvsdesk::gpu",
+            "adapter name={} backend={:?} type={:?}",
+            cvsdesk::diag::scalar(&info.name),
+            info.backend,
+            info.device_type
+        );
+    } else {
+        log::warn!(target: "cvsdesk::gpu", "adapter result=none");
+    }
+    picked.ok_or_else(|| "no adapter can draw this window".to_owned())
 }
 
 fn main() -> eframe::Result<()> {
@@ -94,6 +116,7 @@ fn main() -> eframe::Result<()> {
     let mut show_about = false;
     let mut show_fonts = false;
     let mut show_version = false;
+    let mut log_level: Option<log::LevelFilter> = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -102,6 +125,15 @@ fn main() -> eframe::Result<()> {
             "--screenshot" => {
                 if i + 1 < args.len() {
                     shot = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            // How much detail the log carries: off, error, warn, info (the default),
+            // debug or trace. `CVSDESK_LOG` says the same thing when the program is
+            // started by someone who cannot pass a switch (a shortcut, Explorer).
+            "--log-level" => {
+                if i + 1 < args.len() {
+                    log_level = cvsdesk::diag::level_from(&args[i + 1]);
                     i += 1;
                 }
             }
@@ -136,6 +168,18 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // Diagnostics come up before the window: an adapter that cannot be created or a panic
+    // during startup must still leave a file behind. A switch wins over the environment,
+    // and either one wins over the saved preference read later.
+    let from_env = std::env::var("CVSDESK_LOG")
+        .ok()
+        .and_then(|text| cvsdesk::diag::level_from(&text));
+    let level = log_level.or(from_env).unwrap_or(log::LevelFilter::Info);
+    cvsdesk::diag::init(level, log_level.is_some() || from_env.is_some());
+    if level != log::LevelFilter::Off {
+        cvsdesk::diag::install_panic_hook();
+    }
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1020.0, 680.0])
         .with_min_inner_size([680.0, 420.0])
@@ -159,7 +203,7 @@ fn main() -> eframe::Result<()> {
 
     let shot_for_app = shot.clone();
     let start_for_app = start.clone();
-    eframe::run_native(
+    let result = eframe::run_native(
         "CVS Desk",
         options,
         Box::new(move |cc| {
@@ -173,7 +217,16 @@ fn main() -> eframe::Result<()> {
                 show_about,
             )))
         }),
-    )
+    );
+    match &result {
+        Ok(()) => log::info!(target: "cvsdesk", "session end result=ok"),
+        Err(error) => log::error!(
+            target: "cvsdesk",
+            "session end result=error message={}",
+            cvsdesk::diag::scalar(&error.to_string())
+        ),
+    }
+    result
 }
 
 #[cfg(test)]

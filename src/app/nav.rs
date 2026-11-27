@@ -82,6 +82,10 @@ impl App {
             if dir.is_dir() {
                 self.enter(dir);
             } else {
+                log::warn!(
+                    target: "cvsdesk::folder",
+                    "phase=open result=missing source=back"
+                );
                 self.status = format!("That folder is gone: {}", dir.display());
             }
         }
@@ -92,6 +96,10 @@ impl App {
             if dir.is_dir() {
                 self.enter(dir);
             } else {
+                log::warn!(
+                    target: "cvsdesk::folder",
+                    "phase=open result=missing source=forward"
+                );
                 self.status = format!("That folder is gone: {}", dir.display());
             }
         }
@@ -129,6 +137,11 @@ impl App {
             }
             None => {
                 let typed = self.address.trim().trim_matches('"').trim();
+                log::debug!(
+                    target: "cvsdesk::folder",
+                    "phase=open result=missing source=address empty={}",
+                    typed.is_empty()
+                );
                 self.status = if typed.is_empty() {
                     "Type a folder path in the address bar".into()
                 } else {

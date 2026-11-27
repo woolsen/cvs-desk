@@ -368,6 +368,11 @@ pub fn connect(
     cancel: &CancelToken,
     sink: &mut dyn Sink,
 ) -> Result<Connection> {
+    log::debug!(
+        target: "cvsdesk::connect",
+        "phase=open method={}",
+        root.method.token()
+    );
     match root.method {
         Method::Pserver => {
             let password = match passfile::scrambled_for(&root.key)
@@ -427,8 +432,17 @@ pub fn connect_with_password(
 /// else keeps its own text.
 fn auth_error(cancel: &CancelToken, command: &str, error: io::Error) -> Error {
     if cancel.is_cancelled() {
+        log::debug!(
+            target: "cvsdesk::connect",
+            "phase=auth result=interrupted"
+        );
         Error::interrupted(command)
     } else {
+        log::warn!(
+            target: "cvsdesk::connect",
+            "phase=auth result=error {}",
+            crate::diag::io_error(&error)
+        );
         Error::aborted(command, error.to_string())
     }
 }
@@ -464,6 +478,7 @@ fn pserver(
 
     // The handshake carries the repository path, the user and the password, each on its own
     // line. The password is plain text here; pserver has no encryption.
+    let auth_started = std::time::Instant::now();
     conn.write_line("BEGIN AUTH REQUEST")
         .map_err(|e| auth_error(cancel, command, e))?;
     conn.write_line(&root.path)
@@ -489,6 +504,11 @@ fn pserver(
             }
         })?;
     if answer.trim() != "I LOVE YOU" {
+        log::warn!(
+            target: "cvsdesk::connect",
+            "phase=auth result=rejected elapsed_ms={}",
+            auth_started.elapsed().as_millis()
+        );
         return Err(Error::plain(
             command,
             format!(
@@ -497,28 +517,79 @@ fn pserver(
             ),
         ));
     }
+    log::info!(
+        target: "cvsdesk::connect",
+        "phase=auth result=ok elapsed_ms={}",
+        auth_started.elapsed().as_millis()
+    );
     Ok(conn)
 }
 
 fn tcp_connect(host: &str, port: u16, command: &str) -> Result<TcpStream> {
     let address = format!("{}:{}", host, port);
-    let addrs: Vec<_> = address
-        .to_socket_addrs()
-        .map_err(|e| Error::aborted(command, format!("cannot resolve {}: {}", host, e)))?
-        .collect();
+    let started = std::time::Instant::now();
+    let addrs: Vec<_> = match address.to_socket_addrs() {
+        Ok(addrs) => addrs.collect(),
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::connect",
+                "phase=resolve result=error {} elapsed_ms={}",
+                crate::diag::io_error(&error),
+                started.elapsed().as_millis()
+            );
+            return Err(Error::aborted(
+                command,
+                format!("cannot resolve {}: {}", host, error),
+            ));
+        }
+    };
+    log::debug!(
+        target: "cvsdesk::connect",
+        "phase=resolve result=ok addresses={} elapsed_ms={}",
+        addrs.len(),
+        started.elapsed().as_millis()
+    );
     if addrs.is_empty() {
+        log::warn!(
+            target: "cvsdesk::connect",
+            "phase=resolve result=no-address"
+        );
         return Err(Error::aborted(
             command,
             format!("cannot resolve {}: no address", host),
         ));
     }
     let mut last = None;
-    for addr in addrs {
+    for (index, addr) in addrs.into_iter().enumerate() {
+        let attempt = std::time::Instant::now();
         match TcpStream::connect_timeout(&addr, Duration::from_secs(30)) {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last = Some(e),
+            Ok(stream) => {
+                log::debug!(
+                    target: "cvsdesk::connect",
+                    "phase=tcp result=ok attempt={} elapsed_ms={}",
+                    index,
+                    attempt.elapsed().as_millis()
+                );
+                return Ok(stream);
+            }
+            Err(error) => {
+                log::debug!(
+                    target: "cvsdesk::connect",
+                    "phase=tcp result=error attempt={} {} elapsed_ms={}",
+                    index,
+                    crate::diag::io_error(&error),
+                    attempt.elapsed().as_millis()
+                );
+                last = Some(error);
+            }
         }
     }
+    log::warn!(
+        target: "cvsdesk::connect",
+        "phase=tcp result=error port={} elapsed_ms={}",
+        port,
+        started.elapsed().as_millis()
+    );
     Err(Error::aborted(
         command,
         format!(
@@ -533,6 +604,7 @@ fn tcp_connect(host: &str, port: u16, command: &str) -> Result<TcpStream> {
 fn ext(root: &Root, command: &str, cancel: &CancelToken) -> Result<Connection> {
     let rsh = std::env::var("CVS_RSH").unwrap_or_else(|_| "rsh".to_string());
     let server = std::env::var("CVS_SERVER").unwrap_or_else(|_| "cvs".to_string());
+    log::debug!(target: "cvsdesk::connect", "phase=spawn method=ext");
     let mut cmd = shell_command(&rsh);
     cmd.arg(&root.host).arg(&server).arg("server");
     let mut conn = spawn(cmd, command)?;
@@ -558,9 +630,20 @@ pub fn spawn(mut command: Command, what: &str) -> Result<Connection> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    let mut child = command
-        .spawn()
-        .map_err(|e| Error::aborted(what, format!("cannot start the server: {}", e)))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::connect",
+                "phase=spawn result=error {}",
+                crate::diag::io_error(&error)
+            );
+            return Err(Error::aborted(
+                what,
+                format!("cannot start the server: {}", error),
+            ));
+        }
+    };
     let stdin = child
         .stdin
         .take()

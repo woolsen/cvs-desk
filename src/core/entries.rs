@@ -310,7 +310,19 @@ fn state_for(dir: &Path, e: &Entry) -> State {
     }
     let file = dir.join(&e.name);
     match fs::metadata(&file) {
-        Err(_) => State::Missing,
+        Err(error) => {
+            // A deleted file is expected (it is what "missing" means), but a permission
+            // or sharing failure looks identical in the list. Say which one it was.
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    target: "cvsdesk::folder",
+                    "phase=metadata file={} {}",
+                    crate::diag::file_name(&e.name),
+                    crate::diag::io_error(&error)
+                );
+            }
+            State::Missing
+        }
         Ok(m) => match (
             m.modified().ok().and_then(asctime24_of),
             parse_entry_date(&e.date),
@@ -336,7 +348,27 @@ fn read_text(path: &Path) -> Option<String> {
 
 /// The same, also saying how the bytes were read, so the caller can mention it.
 fn read_text_noted(path: &Path) -> Option<(String, crate::text::Decoded)> {
-    let bytes = fs::read(path).ok()?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // A missing control file is normal (a plain folder has no CVS/Entries); any
+            // other failure is why the list looks wrong and belongs in the log. The file
+            // name is the diagnostic value here, and it is one of our own control files.
+            if error.kind() != std::io::ErrorKind::NotFound {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("?");
+                log::warn!(
+                    target: "cvsdesk::folder",
+                    "phase=read-control file={} {}",
+                    crate::diag::file_name(name),
+                    crate::diag::io_error(&error)
+                );
+            }
+            return None;
+        }
+    };
     let d = crate::text::decode(&bytes);
     Some((d.text.clone(), d))
 }
@@ -438,25 +470,36 @@ pub fn load(dir: &Path) -> Loaded {
 
     // Files sitting in the folder that CVS has no entry for.
     let mut loose: Vec<Row> = Vec::new();
-    if let Ok(rd) = fs::read_dir(dir) {
-        for item in rd.flatten() {
-            let name = item.file_name().to_string_lossy().to_string();
-            if name == "CVS" || is_hidden(&item.path(), &name) || known.contains(&name) {
-                continue;
+    match fs::read_dir(dir) {
+        Ok(rd) => {
+            for item in rd.flatten() {
+                let name = item.file_name().to_string_lossy().to_string();
+                if name == "CVS" || is_hidden(&item.path(), &name) || known.contains(&name) {
+                    continue;
+                }
+                let is_dir = item.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                loose.push(Row {
+                    name,
+                    is_dir,
+                    state: State::Unknown,
+                    origin: Origin::Local,
+                    revision: String::new(),
+                    tag: String::new(),
+                    options: String::new(),
+                    timestamp: mtime_text(&item.path()),
+                    binary: false,
+                    unicode: false,
+                });
             }
-            let is_dir = item.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            loose.push(Row {
-                name,
-                is_dir,
-                state: State::Unknown,
-                origin: Origin::Local,
-                revision: String::new(),
-                tag: String::new(),
-                options: String::new(),
-                timestamp: mtime_text(&item.path()),
-                binary: false,
-                unicode: false,
-            });
+        }
+        Err(error) => {
+            // Without this the list comes back with only the recorded entries, looking
+            // like a folder that lost every untracked file.
+            log::warn!(
+                target: "cvsdesk::folder",
+                "phase=read-dir {}",
+                crate::diag::io_error(&error)
+            );
         }
     }
     rows.extend(loose);

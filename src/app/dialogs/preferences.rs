@@ -89,6 +89,11 @@ pub(super) fn show(
                         ui.checkbox(&mut draft.iso_convert, "Convert text to ISO-8859-1");
                         ui.checkbox(&mut draft.checkout_ro, "Check out read-only");
                         ui.checkbox(&mut draft.unix_lf, "Store files with Unix line ends");
+                        ui.separator();
+                        ui.checkbox(
+                            &mut draft.log_debug,
+                            "Write detailed diagnostics to the log (restart required)",
+                        );
                     }
                     _ => {
                         ui.checkbox(&mut draft.unified, "Diff in unified format");

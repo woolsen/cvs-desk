@@ -139,10 +139,15 @@ pub(crate) struct App {
     state_dirty: bool,
     runner: Runner,
     rx: Option<Receiver<Msg>>,
+    /// The number of the last command started, so its log lines can be put in order, and
+    /// when it started, so the closing line can say how long it took.
+    cmd_seq: u64,
+    run_started: Option<Instant>,
     /// A folder read running on a worker thread: the path it is reading and the channel
     /// that carries the finished rows back. Reading 15,000 entries must not freeze the window.
     load_rx: Option<Receiver<(PathBuf, entries::Loaded)>>,
     loading: Option<PathBuf>,
+    load_started: Option<Instant>,
     /// The repository-name listing running beside the folder read.
     remote: Option<remote::Loader>,
     remote_state: RemoteState,
@@ -225,6 +230,11 @@ impl App {
             render_state
                 .device
                 .on_uncaptured_error(std::sync::Arc::new(move |error| {
+                    log::error!(
+                        target: "cvsdesk::gpu",
+                        "uncaptured error message={}",
+                        cvsdesk::diag::scalar(&error.to_string())
+                    );
                     eprintln!("wgpu error (continuing): {error}");
                     // A failed surface configure is recovered by the next paint, which
                     // reconfigures or recreates the surface it finds out of date.
@@ -246,14 +256,36 @@ impl App {
 
         // One place owns the program's temporary folders: a crashed full-file diff
         // must not leave a revision checkout behind forever.
-        let _ = cvsdesk::temp::cleanup_stale();
+        match cvsdesk::temp::cleanup_stale() {
+            Ok(removed) if removed > 0 => {
+                log::info!(
+                    target: "cvsdesk::startup",
+                    "temp cleanup removed={}",
+                    removed
+                );
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!(
+                target: "cvsdesk::startup",
+                "temp cleanup result=error {}",
+                cvsdesk::diag::io_error(&error)
+            ),
+        }
 
         let mut prefs = Prefs::load().unwrap_or_default();
+        if prefs.log_debug && cvsdesk::diag::enable_debug_unless_explicit() {
+            log::info!(target: "cvsdesk::settings", "level=debug source=preference");
+        }
         // A folder named on the command line wins; without one, reopen the folder the
         // window showed when it last closed; without that, the sample folder as before.
-        let dir = start
-            .or_else(|| prefs.last_folder())
-            .unwrap_or_else(demo::ensure);
+        let (dir, source) = match start {
+            Some(dir) => (dir, "argument"),
+            None => match prefs.last_folder() {
+                Some(dir) => (dir, "last"),
+                None => (demo::ensure(), "demo"),
+            },
+        };
+        log::info!(target: "cvsdesk::startup", "start folder source={}", source);
         prefs.last_dir = dir.display().to_string();
         let filters = Filters::from_view(&prefs.view);
         let sort = SortKey::from_token(&prefs.view.sort);
@@ -286,8 +318,11 @@ impl App {
             state_dirty: true,
             runner: Runner::default(),
             rx: None,
+            cmd_seq: 0,
+            run_started: None,
             load_rx: None,
             loading: None,
+            load_started: None,
             remote: None,
             remote_state: RemoteState::Off,
             remote_enabled: true,
@@ -410,6 +445,12 @@ impl App {
     fn read_folder(&mut self, in_place: bool) {
         let dir = self.dir.clone();
         self.refresh_in_place = in_place;
+        self.load_started = Some(Instant::now());
+        log::debug!(
+            target: "cvsdesk::folder",
+            "phase=read-start in_place={}",
+            in_place
+        );
         let (tx, rx) = channel();
         self.load_rx = Some(rx);
         self.loading = Some(dir.clone());
@@ -460,16 +501,48 @@ impl App {
         match event {
             Some(Ok((dir, loaded))) => {
                 self.load_rx = None;
+                let elapsed = self
+                    .load_started
+                    .take()
+                    .map(|started| started.elapsed().as_millis())
+                    .unwrap_or(0);
+                let stale = dir != self.dir;
+                let rows = loaded.rows.len();
+                let notes = loaded.notes.len();
+                let has_cvs = loaded.has_cvs;
+                let partial = loaded.partial_checkout;
                 if std::mem::take(&mut self.refresh_in_place) {
                     self.apply_refresh_result(dir, loaded);
                 } else {
                     self.apply_load_result(dir, loaded);
+                }
+                if stale {
+                    log::debug!(
+                        target: "cvsdesk::folder",
+                        "phase=read-end result=stale elapsed_ms={}",
+                        elapsed
+                    );
+                } else {
+                    log::info!(
+                        target: "cvsdesk::folder",
+                        "phase=read-end rows={} notes={} cvs={} partial={} elapsed_ms={}",
+                        rows,
+                        notes,
+                        has_cvs,
+                        partial,
+                        elapsed
+                    );
                 }
             }
             Some(Err(TryRecvError::Disconnected)) => {
                 self.load_rx = None;
                 self.loading = None;
                 self.refresh_in_place = false;
+                self.load_started = None;
+                log::error!(
+                    target: "cvsdesk::folder",
+                    "phase=read-end result=worker-vanished"
+                );
                 self.status = "Could not read this folder".into();
             }
             _ => {}

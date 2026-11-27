@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, TryRecvError};
+use std::time::Instant;
 
 use cvsdesk::cvs::{Cmd, CommandRequest, Msg};
 use cvsdesk::cvs_client::work::codec;
@@ -27,12 +28,18 @@ impl App {
     /// change where its refresh or diff preview runs.
     fn start_in(&mut self, dir: PathBuf, mut req: CommandRequest, kind: OutputKind) -> bool {
         if self.runner.running {
+            log::warn!(
+                target: "cvsdesk::command",
+                "phase=refused reason=busy"
+            );
             self.runner
                 .lines
                 .push("Error : cvs is already running !".into());
             self.output = OutputKind::Console;
             return false;
         }
+        self.cmd_seq += 1;
+        let id = self.cmd_seq;
         self.stop_requested = false;
         self.history_waiting = None;
         self.checkout_waiting = None;
@@ -48,12 +55,35 @@ impl App {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let refresh = req.refresh || req.cmd.changes_working_copy();
+        let what = if req.raw_args.is_some() {
+            "raw"
+        } else {
+            req.cmd.name()
+        };
+        log::info!(
+            target: "cvsdesk::command",
+            "id={} cmd={} phase=start files={} args={} root={} raw={} refresh={}",
+            id,
+            what,
+            req.files.len(),
+            args.len(),
+            if root.trim().is_empty() { "none" } else { "set" },
+            req.raw_args.is_some(),
+            refresh
+        );
+        self.run_started = Some(Instant::now());
         let started = self.runner.start(&dir, args, password, line, move |m| {
             let _ = tx.send(m);
         });
         if !started {
             // No worker was spawned, so there will never be a message on this channel.
             self.rx = None;
+            self.run_started = None;
+            log::warn!(
+                target: "cvsdesk::command",
+                "id={} phase=refused reason=empty-command",
+                id
+            );
         }
         self.running_kind = started.then_some(kind);
         self.refresh_after_command = started && refresh;
@@ -322,6 +352,11 @@ impl App {
         // running" forever. Report it as a failed command and let the usual finish path
         // clear every window that was waiting on it.
         if vanished && !msgs.iter().any(|m| matches!(m, Msg::Done(_))) {
+            log::error!(
+                target: "cvsdesk::command",
+                "id={} phase=end result=worker-vanished",
+                self.cmd_seq
+            );
             msgs.push(Msg::Line(
                 "The cvs worker stopped without reporting a result.".into(),
             ));
@@ -329,6 +364,7 @@ impl App {
         }
         let mut finished = false;
         let mut exit_code: Option<i32> = None;
+        let mut stopped = false;
         for m in msgs {
             match m {
                 Msg::Line(l) => {
@@ -340,6 +376,7 @@ impl App {
                     exit_code = Some(code);
                     // A command this program stopped on request is stopped, not failed.
                     if self.stop_requested {
+                        stopped = true;
                         self.stop_requested = false;
                         self.runner.lines.push("Stopped.".into());
                     } else if code != 0 {
@@ -368,7 +405,14 @@ impl App {
             // that just ended leaves the window where it is.
             let mut moved = false;
             if let Some(dir) = self.checkout_waiting.take() {
-                if exit_code == Some(0) && dir.is_dir() {
+                let ok = exit_code == Some(0) && dir.is_dir();
+                log::info!(
+                    target: "cvsdesk::command",
+                    "checkout result={} code={}",
+                    if ok { "ok" } else { "failed" },
+                    exit_code.unwrap_or(-1)
+                );
+                if ok {
                     self.go_to(dir);
                     self.status = format!("Checked out into {}", self.dir.display());
                     moved = true;
@@ -377,6 +421,13 @@ impl App {
             if let Some(wait) = self.history_waiting.take() {
                 let history = History::parse(&wait.file, &self.captured);
                 let error = first_error(&self.captured);
+                log::info!(
+                    target: "cvsdesk::history",
+                    "revisions={} tags={} error={}",
+                    history.revisions.len(),
+                    history.tags.len(),
+                    !error.is_empty()
+                );
                 if history.revisions.is_empty() {
                     let message = if error.is_empty() {
                         "No revisions returned".to_string()
@@ -422,6 +473,13 @@ impl App {
                         } else {
                             first_error(&self.captured)
                         };
+                        log::info!(
+                            target: "cvsdesk::tags",
+                            "query tags={} code={} error={}",
+                            tags.len(),
+                            code,
+                            !error.is_empty()
+                        );
                         if let Some(Dialog::Tags(state)) = self.dialog.as_mut() {
                             state.tags = tags;
                             state.loading = false;
@@ -471,6 +529,20 @@ impl App {
                 self.output = OutputKind::State;
                 self.refresh_state_sheet();
             }
+            let elapsed = self
+                .run_started
+                .take()
+                .map(|started| started.elapsed().as_millis())
+                .unwrap_or(0);
+            log::info!(
+                target: "cvsdesk::command",
+                "id={} phase=end code={} elapsed_ms={} lines={} stopped={}",
+                self.cmd_seq,
+                exit_code.unwrap_or(-1),
+                elapsed,
+                self.captured.len(),
+                stopped
+            );
         }
     }
 
@@ -478,6 +550,12 @@ impl App {
         // A stop the user asked for is not a failure: note it, and keep Msg::Done from
         // reporting the killed process's exit code as a non-zero error.
         let was_running = self.runner.running;
+        log::info!(
+            target: "cvsdesk::command",
+            "id={} phase=stop-requested running={}",
+            self.cmd_seq,
+            was_running
+        );
         let was_history = self.history_waiting.is_some();
         self.history_waiting = None;
         self.tag_waiting = None;
@@ -536,6 +614,21 @@ impl App {
         self.runner
             .lines
             .push(format!("Opening '{}' in the file browser", dir));
+    }
+
+    /// Show the folder the diagnostics log is written to. The menu item exists so a user
+    /// asked for the log does not have to know where `%LOCALAPPDATA%` is.
+    pub(super) fn open_log_folder(&mut self) {
+        let dir = cvsdesk::diag::log_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        match std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+            Ok(_) => log::info!(target: "cvsdesk::ui", "action=open-log-folder result=ok"),
+            Err(error) => log::warn!(
+                target: "cvsdesk::ui",
+                "action=open-log-folder result=error {}",
+                cvsdesk::diag::io_error(&error)
+            ),
+        }
     }
 
     /// Open the entry's folder in Explorer with the entry itself selected.

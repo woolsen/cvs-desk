@@ -26,6 +26,7 @@ pub mod client;
 pub use client as cvs_client;
 pub use core::cvs;
 pub use core::demo;
+pub use core::diag;
 pub use core::diff;
 pub use core::entries;
 pub use core::filekind;

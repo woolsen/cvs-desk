@@ -3,6 +3,7 @@
 
 pub mod cvs;
 pub mod demo;
+pub mod diag;
 pub mod diff;
 pub mod entries;
 pub mod filekind;

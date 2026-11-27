@@ -114,7 +114,17 @@ fn load_pair(
 ) -> Result<LoadedPair, String> {
     // One session for both sides: its `Drop` removes both checkouts, whether the
     // second read succeeds or fails.
-    let session = Session::new().map_err(|error| format!("temporary folder: {error}"))?;
+    let session = match Session::new() {
+        Ok(session) => session,
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::diff",
+                "phase=session result=error {}",
+                cvsdesk::diag::io_error(&error)
+            );
+            return Err(format!("temporary folder: {error}"));
+        }
+    };
     let left_bytes = load_side(dir, root, globals, file, left, &session, "left", cancel)?;
     let right_bytes = load_side(dir, root, globals, file, right, &session, "right", cancel)?;
     Ok(LoadedPair {
@@ -136,7 +146,18 @@ fn load_side(
     match side {
         Side::WorkingCopy => {
             let path = dir.join(file);
-            std::fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+            match std::fs::read(&path) {
+                Ok(bytes) => Ok(bytes),
+                Err(error) => {
+                    log::warn!(
+                        target: "cvsdesk::diff",
+                        "phase=read file={} {}",
+                        cvsdesk::diag::file_name(file),
+                        cvsdesk::diag::io_error(&error)
+                    );
+                    Err(format!("cannot read {}: {error}", path.display()))
+                }
+            }
         }
         Side::Revision(revision) => {
             checkout_revision(dir, root, globals, file, revision, session, child, cancel)
@@ -190,9 +211,24 @@ fn checkout_revision(
     cancel: &CancelToken,
 ) -> Result<Vec<u8>, String> {
     if root.trim().is_empty() {
+        log::warn!(
+            target: "cvsdesk::diff",
+            "phase=checkout result=no-root file={}",
+            cvsdesk::diag::file_name(file)
+        );
         return Err("this folder has no CVS root".to_string());
     }
-    let module = module_path(dir, file)?;
+    let module = match module_path(dir, file) {
+        Ok(module) => module,
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::diff",
+                "phase=module result=invalid file={}",
+                cvsdesk::diag::file_name(file)
+            );
+            return Err(error);
+        }
+    };
     // Do not create the destination: `checkout -d` creates it itself, and an
     // existing folder can make the server's path handling less predictable.
     let dest = session.path(child);
@@ -200,7 +236,7 @@ fn checkout_revision(
     let request = CommandRequest::raw(args);
     let args = request.to_args("", globals);
     let mut sink = CaptureSink::default();
-    let code = engine::run(
+    let code = match engine::run(
         Request {
             cwd: session.dir().to_path_buf(),
             args,
@@ -208,12 +244,28 @@ fn checkout_revision(
         },
         &mut sink,
         cancel,
-    )
-    .map_err(|error| format!("cvs checkout: {error}"))?;
+    ) {
+        Ok(code) => code,
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::diff",
+                "phase=checkout file={} result=engine-error stopped={}",
+                cvsdesk::diag::file_name(file),
+                cancel.is_cancelled()
+            );
+            return Err(format!("cvs checkout: {error}"));
+        }
+    };
     if cancel.is_cancelled() {
         return Err("the diff preview stopped".to_string());
     }
     if code != 0 {
+        log::warn!(
+            target: "cvsdesk::diff",
+            "phase=checkout file={} code={}",
+            cvsdesk::diag::file_name(file),
+            code
+        );
         return Err(sink.failure(code));
     }
 
@@ -222,11 +274,26 @@ fn checkout_revision(
     // temporary tree.
     let file_name = module.rsplit('/').next().unwrap_or(&module);
     let candidates = [dest.join(&module), dest.join(file_name)];
-    let path = candidates
-        .iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| format!("cvs checkout did not write {module}"))?;
-    std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    let Some(path) = candidates.iter().find(|path| path.is_file()) else {
+        log::warn!(
+            target: "cvsdesk::diff",
+            "phase=checkout result=missing-output file={}",
+            cvsdesk::diag::file_name(file)
+        );
+        return Err(format!("cvs checkout did not write {module}"));
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::diff",
+                "phase=read file={} {}",
+                cvsdesk::diag::file_name(file),
+                cvsdesk::diag::io_error(&error)
+            );
+            Err(format!("cannot read {}: {error}", path.display()))
+        }
+    }
 }
 
 /// The repository path of `file` below the checked-out folder's `CVS/Repository`.

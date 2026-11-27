@@ -132,6 +132,9 @@ pub struct Prefs {
     // Commit
     pub word_wrap_log: bool,
     pub log_template: String,
+    /// Write debug-level detail into the diagnostics log. Read once at startup, so a
+    /// change takes effect on the next run.
+    pub log_debug: bool,
 
     // Import: tags last used, offered again next time (P_VendorNames / P_ReleaseNames;
     // the module names in P_ImportModuleNames).
@@ -182,6 +185,7 @@ impl Default for Prefs {
 
             word_wrap_log: true,
             log_template: String::new(),
+            log_debug: false,
 
             vendor_names: Vec::new(),
             release_names: Vec::new(),
@@ -257,6 +261,7 @@ impl Prefs {
         table.insert("P_KeepEditors".into(), Value::Boolean(self.keep_editors));
         table.insert("P_CommitLogs".into(), Value::Boolean(self.word_wrap_log));
         table.insert("P_LogTemplate".into(), text(&self.log_template));
+        table.insert("P_LogDebug".into(), Value::Boolean(self.log_debug));
         table.insert("P_VendorNames".into(), string_array(&self.vendor_names));
         table.insert("P_ReleaseNames".into(), string_array(&self.release_names));
         table.insert(
@@ -272,13 +277,34 @@ impl Prefs {
     /// written by an older version. Unknown names are ignored.
     pub fn load() -> Option<Prefs> {
         if let Some(path) = Self::settings_file() {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                return Some(Self::from_settings_text(&text));
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    log::info!(target: "cvsdesk::settings", "phase=load source=toml");
+                    return Some(Self::from_settings_text(&text));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!(
+                    target: "cvsdesk::settings",
+                    "phase=load source=toml {}",
+                    crate::diag::io_error(&error)
+                ),
             }
         }
         let path = Self::legacy_settings_file()?;
-        let text = std::fs::read_to_string(path).ok()?;
-        Some(Self::from_settings_text(&text))
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                log::info!(target: "cvsdesk::settings", "phase=load source=legacy");
+                Some(Self::from_settings_text(&text))
+            }
+            Err(error) => {
+                log::debug!(
+                    target: "cvsdesk::settings",
+                    "phase=load source=none kind={:?}",
+                    error.kind()
+                );
+                None
+            }
+        }
     }
 
     /// The folder the last session closed on, if it is still there. A folder that has
@@ -400,6 +426,7 @@ impl Prefs {
                 "P_KeepEditors" => set_flag(&mut p.keep_editors, value),
                 "P_CommitLogs" => set_flag(&mut p.word_wrap_log, value),
                 "P_LogTemplate" => set_text(&mut p.log_template, value),
+                "P_LogDebug" => set_flag(&mut p.log_debug, value),
                 "P_VendorNames" => p.vendor_names = string_list(value),
                 "P_ReleaseNames" => p.release_names = string_list(value),
                 "P_ImportModuleNames" => p.import_modules = string_list(value),
@@ -490,6 +517,7 @@ impl Prefs {
                 "P_KeepEditors" => p.keep_editors = flag,
                 "P_CommitLogs" => p.word_wrap_log = flag,
                 "P_LogTemplate" => p.log_template = value.replace("\\n", "\n"),
+                "P_LogDebug" => p.log_debug = flag,
                 "P_VendorNames" => p.vendor_names = list(value),
                 "P_ReleaseNames" => p.release_names = list(value),
                 "P_ImportModuleNames" => p.import_modules = list(value),
@@ -652,8 +680,14 @@ fn string_list(value: &Value) -> Vec<String> {
 /// the TOML format is converted, and so is the old `.txt` file when no TOML file exists
 /// yet. Keys this version does not know stay in the table.
 fn read_table(path: &Path) -> Table {
-    if let Ok(text) = std::fs::read_to_string(path) {
-        return table_from_settings_text(&text);
+    match std::fs::read_to_string(path) {
+        Ok(text) => return table_from_settings_text(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!(
+            target: "cvsdesk::settings",
+            "phase=read result=error {}",
+            crate::diag::io_error(&error)
+        ),
     }
     let Some(legacy) = Prefs::legacy_settings_file() else {
         return Table::new();
@@ -684,7 +718,20 @@ fn update_settings(edit: impl FnOnce(&mut Table)) -> std::io::Result<()> {
 }
 
 fn write_table(path: &Path, table: &Table) -> std::io::Result<()> {
-    std::fs::write(path, table_to_toml(table))
+    match std::fs::write(path, table_to_toml(table)) {
+        Ok(()) => {
+            log::debug!(target: "cvsdesk::settings", "phase=write result=ok");
+            Ok(())
+        }
+        Err(error) => {
+            log::warn!(
+                target: "cvsdesk::settings",
+                "phase=write result=error {}",
+                crate::diag::io_error(&error)
+            );
+            Err(error)
+        }
+    }
 }
 
 fn table_to_toml(table: &Table) -> String {
@@ -784,6 +831,7 @@ mod tests {
         p.view.show_unchanged = false;
         p.view.sort = "state".into();
         p.view.sort_ascending = false;
+        p.log_debug = true;
 
         let text = p.to_toml();
         let table: Table = text.parse().expect("the settings are valid TOML");
@@ -813,6 +861,10 @@ mod tests {
         assert_eq!(back.release_names, vec!["r1"]);
         assert_eq!(back.import_modules, vec!["proj"]);
         assert_eq!(back.log_template, "line one\nline two");
+        assert!(
+            back.log_debug,
+            "the diagnostics preference survives a restart"
+        );
         assert_eq!(back.view, p.view);
         assert_eq!(back.build_root(), ":kserver:ann@cvshost:2402:/repo");
     }

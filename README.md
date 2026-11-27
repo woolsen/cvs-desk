@@ -39,6 +39,21 @@ cvsdesk.exe
 
 `WGPU_BACKEND=dx12` does the same on a machine whose Vulkan driver is missing.
 
+## Diagnostics
+
+CVS Desk keeps a log of what the program was doing: command phases, connection stages,
+counts, timings, and error kinds. It does not keep the user's data: no file contents, commit
+messages, passwords, CVSROOT/host/user, complete paths, or lists of files touched. A file
+name appears only when one file is the failing input.
+
+The log is `cvsdesk.log` under `%LOCALAPPDATA%\CVSDesk\logs`, rotated at 2 MB with two older
+files kept. **Help > Open Log Folder** shows it, and **Help > Copy Diagnostics** puts the
+program version and the most recent lines on the clipboard.
+
+`--log-level debug` adds per-phase detail, and `CVSDESK_LOG=debug` does the same for a start
+that cannot take a switch. The Preferences window can turn the same detail on for the next
+start. A debug log beside a bug report is worth more than a description of the window alone.
+
 ## Features
 
 - Folder tree and file list with per-file state: modified, added, missing, unmodified, and more.

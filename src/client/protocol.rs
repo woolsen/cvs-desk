@@ -290,6 +290,14 @@ impl<'a> Session<'a> {
                 session.err("server doesn't support gzip-file-contents".to_string());
             }
         }
+        log::debug!(
+            target: "cvsdesk::protocol",
+            "phase=start cmd={} utf8={} capabilities={} compression={}",
+            session.command,
+            session.utf8_names,
+            session.capabilities.len(),
+            level
+        );
         Ok(session)
     }
 
@@ -626,6 +634,11 @@ impl<'a> Session<'a> {
     }
 
     pub fn close(mut self) {
+        log::debug!(
+            target: "cvsdesk::protocol",
+            "phase=close cmd={}",
+            self.command
+        );
         self.conn.close();
     }
 }
