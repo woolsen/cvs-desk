@@ -153,18 +153,28 @@ fn a_command_with_no_root_says_so_and_fails() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Read one protocol line from the fake server's client.
+/// Read one protocol line from the fake server's client. A closed pipe ends the test with a
+/// clear message: without this, a loop that waits for a request the client never sends would
+/// read `""` forever and grow its line list until the process runs out of memory.
 fn line<R: BufRead>(reader: &mut R) -> String {
     let mut text = String::new();
-    reader.read_line(&mut text).unwrap();
+    let read = reader.read_line(&mut text).unwrap();
+    assert!(
+        read != 0,
+        "the client closed the connection before sending the expected line"
+    );
     text.trim_end_matches(['\r', '\n']).to_string()
 }
 
 /// Accept one connection, or give up after ten seconds so a client that never connects (a
 /// command this build does not dispatch yet) fails its assertion instead of hanging the run.
 fn accept_within(listener: &TcpListener) -> Option<std::net::TcpStream> {
+    accept_for(listener, std::time::Duration::from_secs(10))
+}
+
+fn accept_for(listener: &TcpListener, wait: std::time::Duration) -> Option<std::net::TcpStream> {
     listener.set_nonblocking(true).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + wait;
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -211,7 +221,7 @@ fn checkout_writes_files_entries_and_times_the_way_cvs_does() {
         assert!(line(&mut reader).starts_with("Valid-responses "));
         assert_eq!(line(&mut reader), "valid-requests");
         writer
-            .write_all(b"Valid-requests Root Valid-responses Case Utf8\nok\n")
+            .write_all(b"Valid-requests Root Valid-responses Case Utf8 expand-modules\nok\n")
             .unwrap();
         assert_eq!(line(&mut reader), "UseUnchanged");
         assert_eq!(line(&mut reader), "Case");
@@ -224,6 +234,7 @@ fn checkout_writes_files_entries_and_times_the_way_cvs_does() {
         writer.write_all(b"Module-expansion mod\nok\n").unwrap();
 
         assert_eq!(line(&mut reader), "Argument -N");
+        assert_eq!(line(&mut reader), "Argument --");
         assert_eq!(line(&mut reader), "Argument mod");
         assert_eq!(line(&mut reader), "Directory .");
         assert_eq!(line(&mut reader), "/repo");
@@ -323,7 +334,7 @@ fn a_checkout_destination_renames_the_top_folder_only_on_disk() {
             line(&mut reader);
         }
         writer
-            .write_all(b"Valid-requests Root Valid-responses\nok\n")
+            .write_all(b"Valid-requests Root Valid-responses expand-modules\nok\n")
             .unwrap();
         assert_eq!(line(&mut reader), "UseUnchanged");
         for _ in 0..4 {
@@ -391,6 +402,7 @@ fn repo_query(
     args: &[&str],
     reply: &'static [u8],
 ) -> (std::process::Output, Vec<String>) {
+    let rootless = args.first().is_some_and(|arg| *arg == "init");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
@@ -410,11 +422,16 @@ fn repo_query(
             assert_eq!(line(&mut reader), expected);
         }
         writer.write_all(b"I LOVE YOU\n").unwrap();
-        assert!(line(&mut reader).starts_with("Root /repo"));
+        // `init` is rootless: the reference sends no `Root` before it (client.c:4461-4467).
+        if !rootless {
+            assert!(line(&mut reader).starts_with("Root /repo"));
+        }
         assert!(line(&mut reader).starts_with("Valid-responses "));
         assert_eq!(line(&mut reader), "valid-requests");
         writer
-            .write_all(b"Valid-requests Root Valid-responses\nok\n")
+            .write_all(
+                b"Valid-requests Root Valid-responses rlog rannotate history rdiff init\nok\n",
+            )
             .unwrap();
 
         let mut lines = Vec::new();
@@ -484,15 +501,10 @@ fn text(output: &[u8]) -> String {
 fn rlog_sends_the_module_and_nothing_else() {
     let (out, lines) = repo_query("rlog-default", &["rlog", "mod"], b"ok\n");
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(lines, ["UseUnchanged", "Argument mod", "rlog"]);
-}
-
-#[test]
-fn a_repository_query_needs_no_working_copy() {
-    // `repo_query` runs in a fresh folder and asserts that it holds no `CVS` directory.
-    let (out, lines) = repo_query("query-no-checkout", &["rlog", "mod"], b"ok\n");
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(lines, ["UseUnchanged", "Argument mod", "rlog"]);
+    assert_eq!(
+        lines,
+        ["UseUnchanged", "Argument --", "Argument mod", "rlog"]
+    );
 }
 
 #[test]
@@ -501,7 +513,13 @@ fn rlog_sends_n_alone() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         lines,
-        ["UseUnchanged", "Argument -N", "Argument mod", "rlog"]
+        [
+            "UseUnchanged",
+            "Argument -N",
+            "Argument --",
+            "Argument mod",
+            "rlog"
+        ]
     );
 }
 
@@ -511,7 +529,13 @@ fn rlog_widens_one_revision_to_a_range() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         lines,
-        ["UseUnchanged", "Argument -r1.1:1.1", "Argument mod", "rlog"]
+        [
+            "UseUnchanged",
+            "Argument -r1.1:1.1",
+            "Argument --",
+            "Argument mod",
+            "rlog"
+        ]
     );
 }
 
@@ -525,6 +549,7 @@ fn rlog_sends_a_date_as_its_own_argument() {
             "UseUnchanged".to_string(),
             "Argument -d".to_string(),
             format!("Argument {}", local_midnight(2020, 1, 1)),
+            "Argument --".to_string(),
             "Argument mod".to_string(),
             "rlog".to_string(),
         ]
@@ -541,6 +566,7 @@ fn rannotate_sends_a_revision_as_two_arguments() {
             "UseUnchanged",
             "Argument -r",
             "Argument 1.1",
+            "Argument --",
             "Argument mod",
             "rannotate"
         ]
@@ -561,6 +587,7 @@ fn rannotate_sends_a_date_as_its_own_argument() {
             "UseUnchanged".to_string(),
             "Argument -D".to_string(),
             format!("Argument {}", local_midnight(2020, 1, 1)),
+            "Argument --".to_string(),
             "Argument mod".to_string(),
             "rannotate".to_string(),
         ]
@@ -571,7 +598,10 @@ fn rannotate_sends_a_date_as_its_own_argument() {
 fn rannotate_r_is_client_side_only() {
     let (out, lines) = repo_query("rannotate-R", &["rannotate", "-R", "mod"], b"ok\n");
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(lines, ["UseUnchanged", "Argument mod", "rannotate"]);
+    assert_eq!(
+        lines,
+        ["UseUnchanged", "Argument --", "Argument mod", "rannotate"]
+    );
 }
 
 #[test]
@@ -581,7 +611,10 @@ fn a_repository_query_routes_m_to_stdout_and_e_to_stderr() {
         &["rlog", "mod"],
         b"M a history line\nE a server note\nok\n",
     );
-    assert_eq!(lines, ["UseUnchanged", "Argument mod", "rlog"]);
+    assert_eq!(
+        lines,
+        ["UseUnchanged", "Argument --", "Argument mod", "rlog"]
+    );
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
         text(&out.stdout).contains("a history line"),
@@ -612,20 +645,16 @@ fn a_server_error_response_fails_the_query() {
 
 #[test]
 fn rlog_with_no_arguments_reports_the_missing_module() {
-    let dir = scratch("rlog-noargs");
-    let out = Command::new(cvs())
-        .current_dir(&dir)
-        .env_remove("CVSROOT")
-        .args(["-d", ":pserver:ann@127.0.0.1:9:/repo", "rlog"])
-        .output()
-        .unwrap();
+    // The reference client sends the bare `rlog` request and the server answers the missing
+    // module (log.c:239-240 only prints usage for a `-H` style call, not for an empty list).
+    let (out, lines) = repo_query("rlog-noargs", &["rlog"], b"error 1 no modules specified\n");
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr).contains("cannot find module `rlog'"),
+        text(&out.stderr).contains("no modules specified"),
         "{}",
         text(&out.stderr)
     );
-    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(lines, ["UseUnchanged", "Argument --", "rlog"]);
 }
 
 #[test]
@@ -645,8 +674,16 @@ fn help_names_the_repository_queries_with_their_reference_summaries_and_synonyms
 
     let synonyms = Command::new(cvs()).arg("--help-synonyms").output().unwrap();
     let synonyms = text(&synonyms.stdout);
-    assert!(synonyms.contains("rannotate    rann ra"), "{}", synonyms);
-    assert!(synonyms.contains("rlog         rl"), "{}", synonyms);
+    assert!(
+        synonyms.contains("        rannotate     rann ra"),
+        "{}",
+        synonyms
+    );
+    assert!(
+        synonyms.contains("        rlog          rl"),
+        "{}",
+        synonyms
+    );
 
     let help = Command::new(cvs())
         .args(["-H", "rannotate"])
@@ -654,7 +691,7 @@ fn help_names_the_repository_queries_with_their_reference_summaries_and_synonyms
         .unwrap();
     let help = text(&help.stdout);
     assert!(
-        help.starts_with("Usage: cvs rannotate [-lRf] [-r rev] [-D date] [files...]\n\t-l\tLocal directory only, no recursion."),
+        help.starts_with("Usage: cvs rannotate [-lRfF] [-r rev] [-D date] [files...]\n\t-l\tLocal directory only, no recursion."),
         "{}",
         help
     );
@@ -672,7 +709,7 @@ fn help_names_the_repository_queries_with_their_reference_summaries_and_synonyms
         help
     );
     assert!(
-        help.contains("\t-r[revisions]\tSpecify revision(s)s to list."),
+        help.contains("\t-r[revisions]\tA comma-separated list of revisions to print:"),
         "{}",
         help
     );
@@ -749,20 +786,7 @@ fn working_session_with(
     reply: &'static [u8],
     prepare: impl FnOnce(&Path),
 ) -> (std::process::Output, Vec<String>, PathBuf, String) {
-    session_run(name, args, capabilities, reply, prepare, None)
-}
-
-/// The same session, with text written to the command's standard input: the answer to a
-/// `release` question, for instance.
-fn working_session_with_input(
-    name: &str,
-    args: &[&str],
-    capabilities: &'static str,
-    reply: &'static [u8],
-    input: &[u8],
-    prepare: impl FnOnce(&Path),
-) -> (std::process::Output, Vec<String>, PathBuf, String) {
-    session_run(name, args, capabilities, reply, prepare, Some(input))
+    session_run(name, args, capabilities, reply, prepare)
 }
 
 fn session_run(
@@ -771,7 +795,6 @@ fn session_run(
     capabilities: &'static str,
     reply: &'static [u8],
     prepare: impl FnOnce(&Path),
-    input: Option<&[u8]>,
 ) -> (std::process::Output, Vec<String>, PathBuf, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -852,18 +875,7 @@ fn session_run(
         .current_dir(&dir)
         .args(["-d", &root])
         .args(args);
-    let out = match input {
-        None => command.output().unwrap(),
-        Some(bytes) => {
-            command
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            let mut child = command.spawn().unwrap();
-            child.stdin.take().unwrap().write_all(bytes).unwrap();
-            child.wait_with_output().unwrap()
-        }
-    };
+    let out = command.output().unwrap();
     let lines = server.join().unwrap();
     std::fs::remove_dir_all(&pass_dir).ok();
     (out, lines, dir, root)
@@ -911,6 +923,7 @@ fn add_schedules_a_file_and_writes_the_dummy_timestamp() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Is-modified new.txt",
@@ -955,6 +968,7 @@ fn add_kb_sends_the_combined_kflag_and_records_it() {
         lines,
         [
             "Argument -kb",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Is-modified bin.dat",
@@ -989,6 +1003,7 @@ fn add_m_sends_the_message_as_its_own_argument() {
         [
             "Argument -m",
             "Argument creation log",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Is-modified msg.txt",
@@ -1017,6 +1032,7 @@ fn add_directory_creates_its_cvs_files_and_parent_entry() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory dir1",
             "/repo/mod/dir1",
             "Questionable file.txt",
@@ -1074,6 +1090,7 @@ fn add_nested_file_names_both_folders_and_returns_to_the_top() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Directory dir1",
@@ -1109,6 +1126,7 @@ fn remove_sends_the_entry_and_an_unchanged_state() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -1142,6 +1160,7 @@ fn remove_f_deletes_the_file_and_sends_no_state() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -1254,7 +1273,13 @@ fn remove_f_an_untracked_file_is_sent_without_an_entry() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         lines,
-        ["Directory .", "/repo/mod", "Argument loose.txt", "remove"]
+        [
+            "Argument --",
+            "Directory .",
+            "/repo/mod",
+            "Argument loose.txt",
+            "remove"
+        ]
     );
     assert!(
         !dir.join("loose.txt").exists(),
@@ -1287,6 +1312,7 @@ E cvs server: 1 file exists; remove it first\nok\n",
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Modified loose.txt",
@@ -1331,6 +1357,7 @@ fn remove_f_an_untracked_file_in_a_subfolder_uses_its_block() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory sub",
             "/repo/mod/sub",
             "Directory .",
@@ -1379,6 +1406,7 @@ E cvs server: nothing known about `b.txt'\nok\n",
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory sub1",
             "/repo/mod/sub1",
             "Directory sub2",
@@ -1419,6 +1447,7 @@ E cvs server: 1 file exists; remove it first\nok\n",
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory sub",
             "/repo/mod/sub",
             "Modified loose.txt",
@@ -1518,12 +1547,12 @@ fn help_names_add_and_remove_with_the_reference_text() {
     let synonyms = Command::new(cvs()).arg("--help-synonyms").output().unwrap();
     let synonyms = text(&synonyms.stdout);
     assert!(
-        synonyms.contains("        add          ad new"),
+        synonyms.contains("        add           ad new"),
         "{}",
         synonyms
     );
     assert!(
-        synonyms.contains("        remove       rm delete"),
+        synonyms.contains("        remove        rm delete"),
         "{}",
         synonyms
     );
@@ -1533,8 +1562,9 @@ fn help_names_add_and_remove_with_the_reference_text() {
     assert_eq!(
         add_help.trim_end_matches('\n'),
         "Usage: cvs add [-k rcs-kflag] [-m message] files...\n\
-         \t-k\tUse \"rcs-kflag\" to add the file with the specified kflag.\n\
-         \t-m\tUse \"message\" for the creation log.\n\
+         \t-k rcs-kflag\tUse \"rcs-kflag\" to add the file with the specified\n\
+         \t\t\tkflag.\n\
+         \t-m message\tUse \"message\" for the creation log.\n\
          (Specify the --help global option for a list of other help options)"
     );
 
@@ -1571,6 +1601,7 @@ fn remove_f_of_an_added_file_drops_the_entry() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /new.txt/0///",
@@ -1604,6 +1635,7 @@ fn tag_sends_the_name_before_one_working_copy_block() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Argument T1",
             "Directory .",
             "/repo/mod",
@@ -1632,6 +1664,7 @@ fn tag_b_sends_the_branch_flag_first() {
         lines,
         [
             "Argument -b",
+            "Argument --",
             "Argument B1",
             "Directory .",
             "/repo/mod",
@@ -1655,6 +1688,7 @@ fn tag_c_sends_the_check_flag() {
         lines,
         [
             "Argument -c",
+            "Argument --",
             "Argument T2",
             "Directory .",
             "/repo/mod",
@@ -1668,13 +1702,25 @@ fn tag_c_sends_the_check_flag() {
 
 #[test]
 fn tag_c_refuses_a_locally_modified_file() {
-    let (out, dir) = failing_command("tag-c-modified", &["tag", "-c", "T1"], |dir| {
-        std::fs::write(
-            dir.join("CVS").join("Entries"),
-            "/hello.txt/1.1/Sat Jan  1 00:00:00 2000//\nD\n",
-        )
-        .unwrap();
-    });
+    // With `-c` the reference sends the file contents and lets the server refuse it
+    // (tag.c:247); the two `E` lines below are the server's answer.
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (out, lines, dir, _) = working_session(
+        "tag-c-modified",
+        &["tag", "-c", "T1"],
+        b"E cvs server: hello.txt is locally modified\n\
+E cvs [server aborted]: correct the above errors first!\n\
+error 1 correct the above errors first!\n",
+        |dir| {
+            std::fs::write(
+                dir.join("CVS").join("Entries"),
+                "/hello.txt/1.1/Sat Jan  1 00:00:00 2000//\nD\n",
+            )
+            .unwrap();
+        },
+    );
     assert_eq!(out.status.code(), Some(1));
     let stderr = text(&out.stderr);
     assert!(
@@ -1688,6 +1734,11 @@ fn tag_c_refuses_a_locally_modified_file() {
         stderr
     );
     assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    assert_eq!(
+        lines[..4],
+        ["Argument -c", "Argument --", "Argument T1", "Directory ."]
+    );
+    assert_eq!(lines[6], "Modified hello.txt", "{:?}", lines);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1704,6 +1755,7 @@ fn tag_sends_an_unknown_file_as_questionable_without_printing_it() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Argument T1",
             "Directory .",
             "/repo/mod",
@@ -1770,6 +1822,7 @@ fn tag_move_sends_the_move_flag() {
         lines,
         [
             "Argument -F",
+            "Argument --",
             "Argument T1",
             "Directory .",
             "/repo/mod",
@@ -1793,6 +1846,7 @@ fn tag_d_deletes_the_tag() {
         lines,
         [
             "Argument -d",
+            "Argument --",
             "Argument T1",
             "Directory .",
             "/repo/mod",
@@ -1821,6 +1875,7 @@ fn tag_r_sends_the_revision_as_two_arguments() {
         [
             "Argument -r",
             "Argument 1.1",
+            "Argument --",
             "Argument T7",
             "Directory .",
             "/repo/mod",
@@ -1849,6 +1904,7 @@ fn tag_date_sends_the_normalized_date_as_its_own_argument() {
         vec![
             "Argument -D".to_string(),
             format!("Argument {}", local_midnight(2020, 1, 1)),
+            "Argument --".to_string(),
             "Argument T5".to_string(),
             "Directory .".to_string(),
             "/repo/mod".to_string(),
@@ -1872,6 +1928,7 @@ fn tag_l_is_sent_and_recursion_is_the_default() {
         lines,
         [
             "Argument -l",
+            "Argument --",
             "Argument T6",
             "Directory .",
             "/repo/mod",
@@ -1888,6 +1945,7 @@ fn tag_l_is_sent_and_recursion_is_the_default() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Argument T7",
             "Directory .",
             "/repo/mod",
@@ -1919,6 +1977,7 @@ fn tag_names_a_nested_file_and_returns_to_the_top() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Argument T3",
             "Directory sub",
             "/repo/mod/sub",
@@ -1979,7 +2038,10 @@ fn rtag_sends_only_the_tag_and_the_module() {
     let (out, lines, dir, _) =
         working_session("rtag-default", &["rtag", "T3", "mod"], b"ok\n", |_| {});
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(lines, ["Argument T3", "Argument mod", "rtag"]);
+    assert_eq!(
+        lines,
+        ["Argument --", "Argument T3", "Argument mod", "rtag"]
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2000,6 +2062,7 @@ fn rtag_ab_sends_both_flags_before_the_tag() {
         [
             "Argument -a",
             "Argument -b",
+            "Argument --",
             "Argument B2",
             "Argument mod",
             "rtag"
@@ -2018,7 +2081,13 @@ fn rtag_d_deletes_the_tag() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         lines,
-        ["Argument -d", "Argument T9", "Argument mod", "rtag"]
+        [
+            "Argument -d",
+            "Argument --",
+            "Argument T9",
+            "Argument mod",
+            "rtag"
+        ]
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -2040,6 +2109,7 @@ fn rtag_r_sends_the_revision_as_two_arguments() {
         [
             "Argument -r",
             "Argument 1.1",
+            "Argument --",
             "Argument T8",
             "Argument mod",
             "rtag"
@@ -2065,6 +2135,7 @@ fn rtag_date_sends_the_normalized_date_as_its_own_argument() {
         vec![
             "Argument -D".to_string(),
             format!("Argument {}", local_midnight(2020, 1, 1)),
+            "Argument --".to_string(),
             "Argument T9".to_string(),
             "Argument mod".to_string(),
             "rtag".to_string(),
@@ -2083,7 +2154,13 @@ fn rtag_n_is_sent_to_the_server() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         lines,
-        ["Argument -n", "Argument T10", "Argument mod", "rtag"]
+        [
+            "Argument -n",
+            "Argument --",
+            "Argument T10",
+            "Argument mod",
+            "rtag"
+        ]
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -2126,12 +2203,12 @@ fn help_names_tag_and_rtag_with_the_reference_text() {
     let synonyms = Command::new(cvs()).arg("--help-synonyms").output().unwrap();
     let synonyms = text(&synonyms.stdout);
     assert!(
-        synonyms.contains("        tag          ta freeze"),
+        synonyms.contains("        tag           ta freeze"),
         "{}",
         synonyms
     );
     assert!(
-        synonyms.contains("        rtag         rt rfreeze"),
+        synonyms.contains("        rtag          rt rfreeze"),
         "{}",
         synonyms
     );
@@ -2142,6 +2219,7 @@ fn help_names_tag_and_rtag_with_the_reference_text() {
         tag_help.trim_end_matches('\n'),
         "Usage: cvs tag [-bcdFflR] [-r rev|-D date] tag [files...]\n\
          \t-b\tMake the tag a \"branch\" tag, allowing concurrent development.\n\
+         \t-B\tAllows -F and -d to disturb branch tags.  Use with extreme care.\n\
          \t-c\tCheck that working files are unmodified.\n\
          \t-d\tDelete the given tag.\n\
          \t-F\tMove tag if it already exists.\n\
@@ -2160,6 +2238,7 @@ fn help_names_tag_and_rtag_with_the_reference_text() {
         "Usage: cvs rtag [-abdFflnR] [-r rev|-D date] tag modules...\n\
          \t-a\tClear tag from removed files that would not otherwise be tagged.\n\
          \t-b\tMake the tag a \"branch\" tag, allowing concurrent development.\n\
+         \t-B\tAllows -F and -d to disturb branch tags.  Use with extreme care.\n\
          \t-d\tDelete the given tag.\n\
          \t-F\tMove tag if it already exists.\n\
          \t-f\tForce a head revision match if tag/date not found.\n\
@@ -2306,6 +2385,7 @@ fn watch_on_sends_the_folder_block_and_the_request() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -2333,6 +2413,7 @@ fn watch_off_sends_the_off_request() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -2364,6 +2445,7 @@ fn watch_add_without_an_action_watches_all_three() {
             "Argument unedit",
             "Argument -a",
             "Argument commit",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -2391,6 +2473,7 @@ fn watch_add_sends_one_action_per_flag() {
         [
             "Argument -a",
             "Argument commit",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -2417,9 +2500,9 @@ fn watch_add_takes_repeated_actions_but_not_a_comma_list() {
         lines[..4],
         [
             "Argument -a",
-            "Argument unedit",
+            "Argument edit",
             "Argument -a",
-            "Argument edit"
+            "Argument unedit"
         ]
     );
     std::fs::remove_dir_all(&dir).ok();
@@ -2457,6 +2540,7 @@ fn watch_remove_sends_the_remove_request() {
         [
             "Argument -a",
             "Argument commit",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -2482,6 +2566,7 @@ fn watch_on_with_no_files_names_the_folder_alone() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -2520,6 +2605,7 @@ fn watch_l_is_sent_and_r_is_not() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
@@ -2537,8 +2623,9 @@ fn watch_without_a_subcommand_prints_the_usage() {
     let (out, dir) = failing_command("watch-usage", &["watch"], |_| {});
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&out.stderr)
-            .starts_with("Usage: cvs watch [on|off|add|remove] [-lR] [-a action] [files...]\n"),
+        text(&out.stderr).starts_with(
+            "Usage: cvs watch {on|off|add|remove} [-lR] [-a <action>]... [<path>]...\n"
+        ),
         "{}",
         text(&out.stderr)
     );
@@ -2566,7 +2653,7 @@ fn watch_refuses_options_before_its_subcommand_and_actions_on_on() {
             assert!(stderr.starts_with(complaint), "{}", stderr);
         }
         assert!(
-            stderr.contains("Usage: cvs watch [on|off|add|remove]"),
+            stderr.contains("Usage: cvs watch {on|off|add|remove}"),
             "{}",
             stderr
         );
@@ -2642,10 +2729,13 @@ fn edit_c_asks_editors_and_stops_when_someone_is_editing() {
     assert_eq!(
         lines,
         [
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Entry /hello.txt/1.1///",
             "Is-modified hello.txt",
+            "Directory .",
+            "/repo/mod",
             "Argument hello.txt",
             "editors",
             "noop"
@@ -2654,7 +2744,7 @@ fn edit_c_asks_editors_and_stops_when_someone_is_editing() {
     let stdout = text(&out.stdout);
     assert!(stdout.contains("hello.txt\tann"), "{}", stdout);
     assert!(
-        text(&out.stderr).contains("cvs [edit aborted]: files being edited!"),
+        text(&out.stderr).contains("cvs [edit aborted]: Files being edited!"),
         "{}",
         text(&out.stderr)
     );
@@ -2669,9 +2759,22 @@ fn unedit_sends_notify_u_and_sets_the_file_read_only() {
         NOTIFIED,
         b"ok\n",
         None,
-        |dir| record_current_time(dir, "hello.txt", "1.1"),
+        |dir| {
+            record_current_time(dir, "hello.txt", "1.1");
+            // `unedit` only reports a file that an earlier `edit` put in CVS/Base
+            // (edit.c:481-491); without it the reference sends the bare `noop`.
+            std::fs::create_dir_all(dir.join("CVS").join("Base")).unwrap();
+            std::fs::write(dir.join("CVS").join("Base").join("hello.txt"), b"hello\n").unwrap();
+            std::fs::write(dir.join("CVS").join("Baserev"), "Bhello.txt/1.1/\n").unwrap();
+        },
     );
     assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        lines.len() >= 5,
+        "lines: {:?}\nstderr: {}",
+        lines,
+        text(&out.stderr)
+    );
     assert_eq!(lines[..3], ["Directory .", "/repo/mod", "Notify hello.txt"]);
     let notice: Vec<&str> = lines[3].split('\t').collect();
     assert_eq!(notice.len(), 5, "{}", lines[3]);
@@ -2796,7 +2899,7 @@ fn help_names_edit_unedit_and_watch_with_the_reference_text() {
     let synonyms = text(&synonyms.stdout);
     for name in ["edit", "unedit", "watch"] {
         assert!(
-            !synonyms.contains(&format!("\n        {:<13}", name)),
+            !synonyms.contains(&format!("\n        {:<14}", name)),
             "{} has no synonyms:\n{}",
             name,
             synonyms
@@ -2806,36 +2909,34 @@ fn help_names_edit_unedit_and_watch_with_the_reference_text() {
     let edit_help = Command::new(cvs()).args(["-H", "edit"]).output().unwrap();
     assert_eq!(
         text(&edit_help.stdout).trim_end_matches('\n'),
-        "Usage: cvs edit [-cflR] [files...]\n\
-         -c: Check that working files are unedited\n\
-         -f: Force edit if working files are edited (default)\n\
-         -l: Local directory only, not recursive\n\
-         -R: Process directories recursively (default)\n\
-         -a: Specify what actions for temporary watch, one of\n\
-         \x20   edit,unedit,commit,all,none\n\
-         (Specify the --help global option for a list of other help options)"
+        "Usage: cvs edit [-lR] [-a <action>]... [<file>]...\n\
+         -l\tLocal directory only, not recursive.\n\
+         -R\tProcess directories recursively (default).\n\
+         -a\tSpecify action to register for temporary watch, one of:\n\
+         \x20 \t`edit', `unedit', `commit', `all', or `none' (defaults to `all').\n\
+         (Specify the --help global option for a list of other help options.)"
     );
 
     let unedit_help = Command::new(cvs()).args(["-H", "unedit"]).output().unwrap();
     assert_eq!(
         text(&unedit_help.stdout).trim_end_matches('\n'),
-        "Usage: cvs unedit [-lR] [files...]\n\
-         -l: Local directory only, not recursive\n\
-         -R: Process directories recursively\n\
-         (Specify the --help global option for a list of other help options)"
+        "Usage: cvs unedit [-lR] [<file>]...\n\
+         -l\tLocal directory only, not recursive.\n\
+         -R\tProcess directories recursively (default).\n\
+         (Specify the --help global option for a list of other help options.)"
     );
 
     let watch_help = Command::new(cvs()).args(["-H", "watch"]).output().unwrap();
     assert_eq!(
         text(&watch_help.stdout).trim_end_matches('\n'),
-        "Usage: cvs watch [on|off|add|remove] [-lR] [-a action] [files...]\n\
-         on/off: turn on/off read-only checkouts of files\n\
-         add/remove: add or remove notification on actions\n\
-         -l (on/off/add/remove): Local directory only, not recursive\n\
-         -R (on/off/add/remove): Process directories recursively\n\
-         -a (add/remove): Specify what actions, one of\n\
-         \x20   edit,unedit,commit,all,none\n\
-         (Specify the --help global option for a list of other help options)"
+        "Usage: cvs watch {on|off|add|remove} [-lR] [-a <action>]... [<path>]...\n\
+         on/off: Turn on/off read-only checkouts of files.\n\
+         add/remove: Add or remove notification on actions.\n\
+         -l (on/off/add/remove): Local directory only, not recursive.\n\
+         -R (on/off/add/remove): Process directories recursively (default).\n\
+         -a (add/remove): Specify what actions, one of: `edit', `unedit',\n\
+         \x20                `commit', `all', or `none' (defaults to `all').\n\
+         (Specify the --help global option for a list of other help options.)"
     );
 }
 
@@ -2870,7 +2971,7 @@ fn update_tells_the_server_a_subfolders_sticky_tag_and_static_flag() {
     assert_eq!(
         lines,
         [
-            "Argument -u",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Directory sub",
@@ -2901,7 +3002,7 @@ fn update_says_nothing_about_markers_the_server_cannot_read() {
     assert_eq!(
         lines,
         [
-            "Argument -u",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Directory sub",
@@ -2930,7 +3031,7 @@ fn an_empty_tag_file_sends_no_sticky_request() {
     assert_eq!(
         lines,
         [
-            "Argument -u",
+            "Argument --",
             "Directory .",
             "/repo/mod",
             "Directory sub",
@@ -2947,7 +3048,7 @@ fn an_empty_tag_file_sends_no_sticky_request() {
 fn init_sends_the_repository_path_and_nothing_else() {
     let (out, lines) = repo_query("init", &["init"], b"ok\n");
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert_eq!(lines, ["UseUnchanged", "init /repo"]);
+    assert_eq!(lines, ["init /repo"]);
 }
 
 #[test]
@@ -3110,6 +3211,7 @@ fn rdiff_sends_one_revision_as_two_arguments() {
             "UseUnchanged",
             "Argument -r",
             "Argument 1.1",
+            "Argument --",
             "Argument mod",
             "rdiff"
         ]
@@ -3134,6 +3236,7 @@ fn rdiff_sends_two_revisions_and_the_diff_format_before_them() {
             "Argument 1.1",
             "Argument -r",
             "Argument 1.2",
+            "Argument --",
             "Argument mod",
             "rdiff"
         ]
@@ -3150,6 +3253,7 @@ fn rdiff_sends_a_date_as_its_own_argument() {
             "UseUnchanged".to_string(),
             "Argument -D".to_string(),
             format!("Argument {}", local_midnight(2020, 1, 1)),
+            "Argument --".to_string(),
             "Argument mod".to_string(),
             "rdiff".to_string(),
         ]
@@ -3309,7 +3413,7 @@ fn export_sends_the_export_request_and_writes_no_cvs_folder() {
         assert!(line(&mut reader).starts_with("Valid-responses "));
         assert_eq!(line(&mut reader), "valid-requests");
         writer
-            .write_all(b"Valid-requests Root Valid-responses\nok\n")
+            .write_all(b"Valid-requests Root Valid-responses expand-modules\nok\n")
             .unwrap();
         assert_eq!(line(&mut reader), "UseUnchanged");
 
@@ -3320,6 +3424,9 @@ fn export_sends_the_export_request_and_writes_no_cvs_folder() {
         writer.write_all(b"Module-expansion mod\nok\n").unwrap();
 
         assert_eq!(line(&mut reader), "Argument -N");
+        assert_eq!(line(&mut reader), "Argument -r");
+        assert_eq!(line(&mut reader), "Argument T1");
+        assert_eq!(line(&mut reader), "Argument --");
         assert_eq!(line(&mut reader), "Argument mod");
         assert_eq!(line(&mut reader), "Directory .");
         assert_eq!(line(&mut reader), "/repo");
@@ -3348,7 +3455,7 @@ fn export_sends_the_export_request_and_writes_no_cvs_folder() {
     let out = Command::new(cvs())
         .env("CVS_PASSFILE", &passfile)
         .current_dir(&dir)
-        .args(["-d", &root, "export", "mod"])
+        .args(["-d", &root, "export", "-r", "T1", "mod"])
         .output()
         .unwrap();
     assert!(
@@ -3372,17 +3479,26 @@ fn export_sends_the_export_request_and_writes_no_cvs_folder() {
 #[test]
 fn export_refuses_to_run_inside_a_working_copy() {
     let dir = scratch("export-in-working-copy");
-    std::fs::create_dir_all(dir.join("CVS")).unwrap();
+    // The reference refuses when the folder it is about to write already holds a `CVS`
+    // entry (checkout.c:553-557); for `export mod` that is `./mod`, not the current folder.
+    std::fs::create_dir_all(dir.join("mod").join("CVS")).unwrap();
     std::fs::write(
-        dir.join("CVS").join("Root"),
+        dir.join("mod").join("CVS").join("Root"),
         ":pserver:ann@127.0.0.1:1:/repo\n",
     )
     .unwrap();
-    std::fs::write(dir.join("CVS").join("Repository"), "mod\n").unwrap();
+    std::fs::write(dir.join("mod").join("CVS").join("Repository"), "mod\n").unwrap();
     let out = Command::new(cvs())
         .current_dir(&dir)
         .env_remove("CVSROOT")
-        .args(["-d", ":pserver:ann@127.0.0.1:1:/repo", "export", "mod"])
+        .args([
+            "-d",
+            ":pserver:ann@127.0.0.1:1:/repo",
+            "export",
+            "-r",
+            "T1",
+            "mod",
+        ])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -3399,7 +3515,7 @@ fn official_aliases_reach_their_commands() {
     for (alias, usage) in [
         ("ann", "Usage: cvs annotate"),
         ("blame", "Usage: cvs annotate"),
-        ("get", "Usage: cvs checkout"),
+        ("get", "Usage:\n  cvs checkout"),
         ("com", "Usage: cvs commit"),
         ("lo", "Usage: cvs log"),
         ("logon", "Usage: cvs login"),
@@ -3422,14 +3538,14 @@ fn official_aliases_reach_their_commands() {
     let synonyms = Command::new(cvs()).arg("--help-synonyms").output().unwrap();
     let synonyms = text(&synonyms.stdout);
     for line in [
-        "annotate     ann blame",
-        "checkout     co get",
-        "commit       ci com",
-        "log          lo",
-        "login        logon lgn",
-        "status       st stat",
-        "update       up upd",
-        "version      ve ver",
+        "annotate      ann blame",
+        "checkout      co get",
+        "commit        ci com",
+        "log           lo",
+        "login         logon lgn",
+        "status        st stat",
+        "update        up upd",
+        "version       ve ver",
     ] {
         assert!(
             synonyms.contains(line),
@@ -3451,24 +3567,156 @@ fn an_unknown_command_is_named_as_such() {
     );
 }
 
+/// A fake pserver for `release`. Its report is the reference's child `cvs -n -q update`
+/// (release.c:135-146), so the first connection carries that request and a second one carries
+/// `Argument`/`release` after the user answers.
+fn release_session(
+    name: &str,
+    args: &[&str],
+    scan_reply: &'static [u8],
+    reply: &'static [u8],
+    input: &[u8],
+    prepare: impl FnOnce(&Path),
+) -> (std::process::Output, Vec<String>, Vec<String>, PathBuf) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let root = format!(":pserver:ann@127.0.0.1:{}:/repo", port);
+    let server = std::thread::spawn(move || {
+        let password = scrambled_secret();
+        let mut scan_lines = Vec::new();
+        let mut release_lines = Vec::new();
+
+        // The dry-run update: `cvs -n -q update`, with the global options it implies.
+        let Some(stream) = accept_within(&listener) else {
+            return (scan_lines, release_lines);
+        };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        for expected in [
+            "BEGIN AUTH REQUEST",
+            "/repo",
+            "ann",
+            password.as_str(),
+            "END AUTH REQUEST",
+        ] {
+            assert_eq!(line(&mut reader), expected);
+        }
+        writer.write_all(b"I LOVE YOU\n").unwrap();
+        assert!(line(&mut reader).starts_with("Root /repo"));
+        assert!(line(&mut reader).starts_with("Valid-responses "));
+        assert_eq!(line(&mut reader), "valid-requests");
+        writer
+            .write_all(b"Valid-requests Root Valid-responses Global_option Case Utf8\nok\n")
+            .unwrap();
+        assert_eq!(line(&mut reader), "Global_option -n");
+        assert_eq!(line(&mut reader), "Global_option -q");
+        assert_eq!(line(&mut reader), "UseUnchanged");
+        assert_eq!(line(&mut reader), "Case");
+        assert_eq!(line(&mut reader), "Utf8");
+        loop {
+            let text = line(&mut reader);
+            let done = text == "update";
+            scan_lines.push(text);
+            if done {
+                break;
+            }
+        }
+        writer.write_all(scan_reply).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        // A "no" answer ends the command; the reference sends no release request then.
+        let Some(stream) = accept_for(&listener, std::time::Duration::from_secs(2)) else {
+            return (scan_lines, release_lines);
+        };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        for expected in [
+            "BEGIN AUTH REQUEST",
+            "/repo",
+            "ann",
+            password.as_str(),
+            "END AUTH REQUEST",
+        ] {
+            assert_eq!(line(&mut reader), expected);
+        }
+        writer.write_all(b"I LOVE YOU\n").unwrap();
+        assert!(line(&mut reader).starts_with("Root /repo"));
+        assert!(line(&mut reader).starts_with("Valid-responses "));
+        assert_eq!(line(&mut reader), "valid-requests");
+        writer
+            .write_all(b"Valid-requests Root Valid-responses Case Utf8\nok\n")
+            .unwrap();
+        assert_eq!(line(&mut reader), "UseUnchanged");
+        assert_eq!(line(&mut reader), "Case");
+        assert_eq!(line(&mut reader), "Utf8");
+        loop {
+            let text = line(&mut reader);
+            let done = text == "release";
+            release_lines.push(text);
+            if done {
+                break;
+            }
+        }
+        writer.write_all(reply).unwrap();
+        writer.flush().unwrap();
+        (scan_lines, release_lines)
+    });
+
+    let dir = working_copy(name, &root);
+    prepare(&dir);
+
+    let pass_dir = scratch(&format!("{}-pass", name));
+    let passfile = pass_dir.join(".cvspass");
+    let mut pass = root.as_bytes().to_vec();
+    pass.push(b' ');
+    pass.extend_from_slice(&scramble(b"secret"));
+    pass.push(b'\n');
+    std::fs::write(&passfile, pass).unwrap();
+
+    let mut command = Command::new(cvs());
+    command
+        .env("CVS_PASSFILE", &passfile)
+        .current_dir(&dir)
+        .args(["-d", &root])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let (scan_lines, release_lines) = server.join().unwrap();
+    std::fs::remove_dir_all(&pass_dir).ok();
+    (out, scan_lines, release_lines, dir)
+}
+
 #[test]
 fn release_reports_altered_files_and_sends_the_release_request() {
     let _env = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (out, lines, dir, _) = working_session_with_input(
+    let (out, scan, lines, dir) = release_session(
         "release-altered",
         &["release", "."],
-        "Case Utf8",
+        b"M M hello.txt\nok\n",
         b"ok\n",
         b"y\n",
-        |_| {},
+        |dir| {
+            // The dry-run update must see one local change to report `M hello.txt`.
+            std::fs::write(dir.join("hello.txt"), "changed\n").unwrap();
+        },
     );
     assert!(
         out.status.success(),
         "stdout: {}\nstderr: {}",
         text(&out.stdout),
         text(&out.stderr)
+    );
+    assert_eq!(scan.last().map(String::as_str), Some("update"));
+    assert_eq!(
+        scan[0], "Argument --",
+        "the update request starts with the separator"
     );
     let stdout = text(&out.stdout);
     assert!(
@@ -3491,24 +3739,31 @@ fn release_reports_altered_files_and_sends_the_release_request() {
 }
 
 #[test]
-fn release_declined_by_the_user_never_contacts_the_server() {
-    let dir = working_copy("release-declined", ":pserver:ann@127.0.0.1:1:/repo");
-    let mut child = Command::new(cvs())
-        .current_dir(&dir)
-        .env_remove("CVSROOT")
-        .args(["-d", ":pserver:ann@127.0.0.1:1:/repo", "release", "."])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(b"n\n").unwrap();
-    let out = child.wait_with_output().unwrap();
+fn release_declined_by_the_user_sends_no_release_request() {
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The reference runs its dry-run update before it asks (release.c:193-235), so the scan
+    // connection still happens; a "no" answer must stop before the release request.
+    let (out, scan, release, dir) = release_session(
+        "release-declined",
+        &["release", "."],
+        b"ok\n",
+        b"ok\n",
+        b"n\n",
+        |_| {},
+    );
     assert!(
         out.status.success(),
         "stdout: {}\nstderr: {}",
         text(&out.stdout),
         text(&out.stderr)
+    );
+    assert_eq!(scan.last().map(String::as_str), Some("update"));
+    assert!(
+        release.is_empty(),
+        "a declined release must not send the request: {:?}",
+        release
     );
     assert!(
         text(&out.stderr).contains("** `release' aborted by user choice."),
@@ -3523,10 +3778,10 @@ fn release_d_deletes_the_folder_it_released() {
     let _env = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (out, lines, dir, _) = working_session_with_input(
+    let (out, scan, lines, dir) = release_session(
         "release-delete",
         &["release", "-d", "sub"],
-        "Case Utf8",
+        b"M M one.txt\nok\n",
         b"ok\n",
         b"y\n",
         |dir| {
@@ -3545,6 +3800,7 @@ fn release_d_deletes_the_folder_it_released() {
         text(&out.stdout),
         text(&out.stderr)
     );
+    assert_eq!(scan.last().map(String::as_str), Some("update"));
     assert!(
         text(&out.stdout)
             .contains("Are you sure you want to release (and delete) directory `sub': "),
@@ -3857,28 +4113,75 @@ fn import_without_a_vendor_or_release_tag_prints_the_usage() {
 }
 
 #[test]
-fn import_without_a_message_says_how_to_give_one() {
+fn import_without_a_message_runs_the_editor_and_aborts_on_eof() {
+    // The reference opens the server before it runs the editor (import.c:243-251). An
+    // unchanged message then asks the a/c/e/! question; EOF there is fatal (logmsg.c:343-351).
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let Some(stream) = accept_within(&listener) else {
+            return;
+        };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let password = scrambled_secret();
+        for expected in [
+            "BEGIN AUTH REQUEST",
+            "/repo",
+            "ann",
+            password.as_str(),
+            "END AUTH REQUEST",
+        ] {
+            assert_eq!(line(&mut reader), expected);
+        }
+        writer.write_all(b"I LOVE YOU\n").unwrap();
+        assert!(line(&mut reader).starts_with("Root /repo"));
+        assert!(line(&mut reader).starts_with("Valid-responses "));
+        assert_eq!(line(&mut reader), "valid-requests");
+        writer
+            .write_all(b"Valid-requests Root Valid-responses\nok\n")
+            .unwrap();
+        writer.flush().unwrap();
+    });
+
     let dir = scratch("import-no-message");
+    let pass_dir = scratch("import-no-message-pass");
+    let passfile = pass_dir.join(".cvspass");
+    let root = format!(":pserver:ann@127.0.0.1:{}:/repo", port);
+    let mut pass = root.as_bytes().to_vec();
+    pass.push(b' ');
+    pass.extend_from_slice(&scramble(b"secret"));
+    pass.push(b'\n');
+    std::fs::write(&passfile, pass).unwrap();
+    // An editor that exits without touching the message file.
+    let editor = if cfg!(windows) {
+        "cmd /c exit 0"
+    } else {
+        "true"
+    };
     let out = Command::new(cvs())
+        .env("CVS_PASSFILE", &passfile)
+        .env("CVSEDITOR", editor)
         .current_dir(&dir)
         .env_remove("CVSROOT")
-        .args([
-            "-d",
-            ":pserver:ann@127.0.0.1:1:/repo",
-            "import",
-            "mod",
-            "vendor",
-            "start",
-        ])
+        .args(["-d", &root, "import", "mod", "vendor", "start"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
     assert!(
-        text(&out.stderr).contains("no log message; use -m \"message\""),
+        stderr.contains("cvs [import aborted]: aborting"),
         "{}",
-        text(&out.stderr)
+        stderr
     );
+    assert!(
+        text(&out.stdout).contains("Log message unchanged or not specified"),
+        "{}",
+        text(&out.stdout)
+    );
+    server.join().unwrap();
     std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&pass_dir).ok();
 }
 
 #[test]
@@ -4046,7 +4349,7 @@ fn z_outside_the_range_is_refused_before_any_connection() {
 #[test]
 fn import_refuses_a_module_outside_the_repository() {
     let dir = scratch("import-outside");
-    for module in ["../evil", "/absolute", "a/../b"] {
+    for module in ["../evil", "/absolute"] {
         let out = Command::new(cvs())
             .current_dir(&dir)
             .env_remove("CVSROOT")
@@ -4070,6 +4373,36 @@ fn import_refuses_a_module_outside_the_repository() {
             text(&out.stderr)
         );
     }
+
+    // `a/../b` has no leading backreference (`pathname_levels` is 0), so the reference accepts
+    // it (subr.c:187-217, import.c:193) and only the transport can fail.
+    let out = Command::new(cvs())
+        .current_dir(&dir)
+        .env_remove("CVSROOT")
+        .args([
+            "-d",
+            ":pserver:ann@127.0.0.1:1:/repo",
+            "import",
+            "-m",
+            "x",
+            "a/../b",
+            "vendor",
+            "start",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        !stderr.contains("not relative within the repository"),
+        "{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("connect to 127.0.0.1:1 failed"),
+        "{}",
+        stderr
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

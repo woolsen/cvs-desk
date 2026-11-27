@@ -42,6 +42,151 @@ fn one(text: &str) -> String {
     }
 }
 
+/// A `log -d` value: `;`-separated dates and ranges. Every item is normalized like
+/// [`normalize`], and the values are returned in the order the user wrote them, one per
+/// `Argument -d`. A value that is clearly not a date, or a range whose start is after its
+/// end, is refused with the offending item as the error text.
+pub(crate) fn normalize_dates(text: &str) -> std::result::Result<Vec<String>, String> {
+    text.split(';')
+        .map(|item| normalize_date_item(item.trim()))
+        .collect()
+}
+
+fn normalize_date_item(text: &str) -> std::result::Result<String, String> {
+    if text.is_empty() {
+        return Err(text.to_string());
+    }
+
+    let Some(range) = range_parts(text) else {
+        return match parse(text) {
+            Some(time) => Ok(utc_text(time)),
+            // Text this module cannot parse but the server's getdate may understand (month
+            // names, relative phrases, other separators) is passed through, as before.
+            None if date_like(text) => Ok(text.to_string()),
+            None => Err(text.to_string()),
+        };
+    };
+
+    // Compare only when both sides are dates this module understands; a phrase only the
+    // server can read is left for the server to check.
+    for side in [range.start, range.end] {
+        let side = side.trim();
+        if !side.is_empty() && parse(side).is_none() && !date_like(side) {
+            return Err(text.to_string());
+        }
+    }
+
+    let start = endpoint(range.start, default_start());
+    let end = endpoint(range.end, default_end());
+    if let (Some(start), Some(end)) = (start, end) {
+        if start > end {
+            return Err(text.to_string());
+        }
+        return Ok(format!(
+            "{}{}{}",
+            utc_text(start),
+            if range.inclusive { "<=" } else { "<" },
+            utc_text(end)
+        ));
+    }
+
+    // At least one side is a phrase only the server understands; keep the usual shape.
+    Ok(normalize(text))
+}
+
+fn endpoint(text: &str, default: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let text = text.trim();
+    if text.is_empty() {
+        Some(default)
+    } else {
+        parse(text)
+    }
+}
+
+/// The reference's `1/1/1970 UTC` for an open start of a range.
+fn default_start() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap()
+}
+
+/// The reference's `2038-01-01` for an open end of a range.
+fn default_end() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2038, 1, 1, 0, 0, 0).unwrap()
+}
+
+struct RangeParts<'a> {
+    start: &'a str,
+    end: &'a str,
+    inclusive: bool,
+}
+
+/// Split `D1<D2`, `D1<=D2`, `D2>D1` or `D2>=D1` into its two ends. As in the reference, a
+/// `>` range is reversed into a `<` range.
+fn range_parts(text: &str) -> Option<RangeParts<'_>> {
+    if let Some((end, rest)) = text.split_once('>') {
+        let (start, inclusive) = match rest.strip_prefix('=') {
+            Some(start) => (start, true),
+            None => (rest, false),
+        };
+        return Some(RangeParts {
+            start,
+            end,
+            inclusive,
+        });
+    }
+    if let Some((start, rest)) = text.split_once('<') {
+        let (end, inclusive) = match rest.strip_prefix('=') {
+            Some(end) => (end, true),
+            None => (rest, false),
+        };
+        return Some(RangeParts {
+            start,
+            end,
+            inclusive,
+        });
+    }
+    None
+}
+
+/// Whether text at least looks like something the server's date parser might accept. This is
+/// the same tolerance `tag -D` uses: refuse only text with nothing date-like in it.
+fn date_like(text: &str) -> bool {
+    const WORDS: [&str; 27] = [
+        "now",
+        "today",
+        "tomorrow",
+        "yesterday",
+        "last",
+        "next",
+        "ago",
+        "this",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "may",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "oct",
+        "nov",
+        "dec",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
+    ];
+    let lower = text.to_ascii_lowercase();
+    let has_word = lower
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .any(|part| WORDS.contains(&part));
+    has_word
+        || (text.chars().any(|c| c.is_ascii_digit()) && text.chars().any(|c| "-/.:,".contains(c)))
+}
+
 fn parse(text: &str) -> Option<DateTime<Utc>> {
     if text.is_empty() {
         return None;
@@ -182,6 +327,52 @@ mod tests {
         for text in ["garbage", "last tuesday", "", "1 day ago"] {
             assert_eq!(normalize(text), text);
         }
+    }
+
+    #[test]
+    fn a_date_list_is_split_on_semicolons() {
+        let values = normalize_dates(&format!("2020-01-01;{}", "2020-02-01<2020-03-01")).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], midnight(2020, 1, 1));
+        assert_eq!(
+            values[1],
+            format!("{}<{}", midnight(2020, 2, 1), midnight(2020, 3, 1))
+        );
+    }
+
+    #[test]
+    fn a_range_that_runs_backwards_is_refused() {
+        let error = normalize_dates("2020-02-01<2020-01-01").unwrap_err();
+        assert_eq!(error, "2020-02-01<2020-01-01");
+    }
+
+    #[test]
+    fn a_reversed_greater_than_range_is_flipped_not_refused() {
+        let values = normalize_dates("2020-02-01>2020-01-01").unwrap();
+        assert_eq!(
+            values,
+            vec![format!("{}<{}", midnight(2020, 1, 1), midnight(2020, 2, 1))]
+        );
+    }
+
+    #[test]
+    fn an_open_range_gets_the_reference_defaults() {
+        let values = normalize_dates("<2020-01-01").unwrap();
+        assert_eq!(
+            values[0],
+            format!("{}<{}", utc_text(default_start()), midnight(2020, 1, 1))
+        );
+    }
+
+    #[test]
+    fn text_with_nothing_date_like_is_refused() {
+        assert!(normalize_dates("garbage").is_err());
+        assert!(normalize_dates("2020-01-01;not a date at all").is_err());
+        // A phrase the server's getdate understands is left for the server.
+        assert_eq!(
+            normalize_dates("last tuesday").unwrap(),
+            vec!["last tuesday"]
+        );
     }
 }
 

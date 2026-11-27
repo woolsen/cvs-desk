@@ -4,10 +4,11 @@
 //! `C:\repo` is also a root: it means `:local:`. CVSNT adds `proxy=HOST:PORT:` after
 //! `:pserver:` when a proxy is configured (see the desktop program's `build_cvsroot`).
 //!
-//! A root is also the key `.cvspass` is stored under, so the text the user typed has to be
-//! kept as it was typed — including whether a port was written. [`Root::key`] is that text
-//! with any password removed, never rebuilt from the parsed pieces.
+//! The text the user typed is kept as it was typed — including whether a port was written
+//! — because messages show it. [`Root::key`] is that text with any password removed, never
+//! rebuilt from the parsed pieces; `passfile` normalizes it for the `.cvspass` key.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::client::error::{Error, Result};
@@ -67,21 +68,61 @@ impl Method {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Run-time settings that travel with a root but are not part of its text.
+///
+/// They live here because every command already receives the root, and the protocol needs
+/// them before the first request (`Global_option`) while the command needs them for its
+/// local writes (`-n`). [`Root::parse`] leaves them at their defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireOptions {
+    /// The `-z` level for connections to this root.
+    pub compression: u32,
+    /// `-n`: report what would happen, change nothing.
+    pub no_execute: bool,
+    /// How quiet: 0 normal, 1 `-q`, 2 `-Q`.
+    pub quiet: u32,
+    /// `-t`: ask the server to trace as well.
+    pub trace: bool,
+    /// `-r`: new working files are read-only.
+    pub readonly: bool,
+    /// `-e editor`: the editor for log messages, `None` for the environment/default.
+    pub editor: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct Root {
-    /// The root exactly as it was written, minus any password. `.cvspass` uses this as its key.
+    /// The root exactly as it was written, minus any password. `passfile` normalizes it
+    /// before using it as a `.cvspass` key.
     pub key: String,
     pub method: Method,
     pub user: String,
+    /// The password written into the root as `user:password@host`, if any. `login` uses it
+    /// without asking (login.c:544-547); it is never part of [`Root::key`] or a message.
+    pub password: Option<String>,
     pub host: String,
     /// Zero when the method has no port (ext) or the root has none (local).
     pub port: u16,
     pub proxy: Option<(String, u16)>,
     /// The repository path. For a remote root it is the path on the server.
     pub path: String,
-    /// The `-z` level for connections to this root. It is a connection setting, not part of
-    /// the root text, so [`Root::parse`] always leaves it at zero.
-    pub compression: u32,
+    /// Run-time settings that are not part of the root text.
+    pub options: WireOptions,
+}
+
+impl fmt::Debug for Root {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Root")
+            .field("key", &self.key)
+            .field("method", &self.method)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("proxy", &self.proxy)
+            .field("path", &self.path)
+            .field("options", &self.options)
+            .finish()
+    }
 }
 
 impl Root {
@@ -97,11 +138,12 @@ impl Root {
                 key: raw.to_string(),
                 method: Method::Local,
                 user: String::new(),
+                password: None,
                 host: String::new(),
                 port: 0,
                 proxy: None,
                 path: raw.to_string(),
-                compression: 0,
+                options: WireOptions::default(),
             });
         };
 
@@ -124,11 +166,12 @@ impl Root {
                 key: raw.to_string(),
                 method,
                 user: String::new(),
+                password: None,
                 host: String::new(),
                 port: 0,
                 proxy: None,
                 path: rest.to_string(),
-                compression: 0,
+                options: WireOptions::default(),
             });
         }
 
@@ -151,11 +194,26 @@ impl Root {
             rest = after_port;
         }
 
-        let (user, password, host_part) = match rest.rfind('@') {
+        // The userinfo ends at the first `/`, the first `@` and then the first `:`, as
+        // `parse_cvsroot` reads it (root.c:492-520). Bounding it by the path keeps an `@`
+        // in the repository name from looking like a password separator.
+        let base = raw.len() - rest.len();
+        let path_start = rest.find('/').unwrap_or(rest.len());
+        let mut host_start = base;
+        let mut password_colon = None;
+        let (user, password, host_part) = match rest[..path_start].find('@') {
             Some(at) => {
                 let info = &rest[..at];
-                match info.split_once(':') {
-                    Some((user, password)) => (user.to_string(), Some(password), &rest[at + 1..]),
+                host_start = base + at;
+                match info.find(':') {
+                    Some(colon) => {
+                        password_colon = Some(base + colon);
+                        (
+                            info[..colon].to_string(),
+                            Some(info[colon + 1..].to_string()),
+                            &rest[at + 1..],
+                        )
+                    }
                     None => (info.to_string(), None, &rest[at + 1..]),
                 }
             }
@@ -194,12 +252,8 @@ impl Root {
         };
 
         // Keep the typed root as the passfile key, but take the password out of it.
-        let key = match password {
-            Some(_) => {
-                let at = raw.rfind('@').unwrap();
-                let colon = raw[..at].rfind(':').unwrap();
-                format!("{}{}", &raw[..colon], &raw[at..])
-            }
+        let key = match password_colon {
+            Some(colon) => format!("{}{}", &raw[..colon], &raw[host_start..]),
             None => raw.to_string(),
         };
 
@@ -207,11 +261,12 @@ impl Root {
             key,
             method,
             user,
+            password,
             host: host.to_string(),
             port,
             proxy,
             path: path.to_string(),
-            compression: 0,
+            options: WireOptions::default(),
         })
     }
 
@@ -233,21 +288,23 @@ impl Root {
 
 /// A root removed from a password, for an error message.
 pub fn scrub(raw: &str) -> String {
-    let Some(at) = raw.rfind('@') else {
-        return raw.to_string();
-    };
-    let Some(colon) = raw[..at].rfind(':') else {
-        return raw.to_string();
-    };
-    // Only scrub when the colon is inside the userinfo, not the one after the method.
-    let method_end = raw
+    // The method prefix comes first, then the userinfo; the path cannot hold a password.
+    let Some(method_end) = raw
         .strip_prefix(':')
         .and_then(|s| s.find(':'))
-        .map(|i| i + 2);
-    if method_end.is_some_and(|start| colon < start) {
+        .map(|i| i + 2)
+    else {
         return raw.to_string();
-    }
-    format!("{}:***{}", &raw[..colon], &raw[at..])
+    };
+    let tail = &raw[method_end..];
+    let path_start = tail.find('/').unwrap_or(tail.len());
+    let Some(at) = tail[..path_start].rfind('@') else {
+        return raw.to_string();
+    };
+    let Some(colon) = tail[..at].rfind(':').map(|i| method_end + i) else {
+        return raw.to_string();
+    };
+    format!("{}:***{}", &raw[..colon], &raw[method_end + at..])
 }
 
 fn default_port(method: &Method) -> u16 {
@@ -379,9 +436,34 @@ mod tests {
     fn a_password_is_taken_out_of_the_key_and_messages() {
         let root = Root::parse(":pserver:ann:secret@cvshost:/repo").unwrap();
         assert_eq!(root.user, "ann");
+        assert_eq!(root.password.as_deref(), Some("secret"));
         assert_eq!(root.key, ":pserver:ann@cvshost:/repo");
         assert_eq!(root.display(), ":pserver:ann@cvshost:/repo");
         assert!(!format!("{}", scrub(":pserver:ann:secret@cvshost:/repo")).contains("secret"));
+    }
+
+    #[test]
+    fn the_debug_form_hides_the_password() {
+        let root = Root::parse(":pserver:ann:secret@cvshost:/repo").unwrap();
+        let text = format!("{:?}", root);
+        assert!(!text.contains("secret"), "{}", text);
+        assert!(text.contains("<redacted>"), "{}", text);
+    }
+
+    #[test]
+    fn a_password_is_found_before_the_first_slash_and_at_sign() {
+        let root = Root::parse(":pserver:ann:secret@cvshost:/repo@dir").unwrap();
+        assert_eq!(root.user, "ann");
+        assert_eq!(root.password.as_deref(), Some("secret"));
+        assert_eq!(root.host, "cvshost");
+        assert_eq!(root.path, "/repo@dir");
+        assert_eq!(root.key, ":pserver:ann@cvshost:/repo@dir");
+
+        let root = Root::parse(":pserver:ann@cvshost:/repo@dir").unwrap();
+        assert_eq!(root.user, "ann");
+        assert_eq!(root.password, None);
+        assert_eq!(root.path, "/repo@dir");
+        assert_eq!(root.key, ":pserver:ann@cvshost:/repo@dir");
     }
 
     #[test]

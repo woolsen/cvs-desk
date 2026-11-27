@@ -5,31 +5,39 @@
 //! hands the notice to the file's watchers. The local side effect is the read-only bit: `edit`
 //! makes the file writable so the user can work on it.
 //!
-//! `-c` is the careful form. It first asks the server who is already editing (`editors`) and
-//! stops with `files being edited!` when the answer names anyone; only a clean answer goes on
-//! to the notification and the writable bit.
+//! The local half happens first, as it does in the reference (`edit.c:312-362,456-461`): the
+//! notice goes into `CVS/Notify`, the file is made writable, and a writable copy is kept in
+//! `CVS/Base` for `unedit`. Only then is the server contacted. If it cannot be reached the
+//! notice stays queued and the next `edit`/`unedit` sends it.
+//!
+//! `-c` is the careful form (a CVSNT extension). It first asks the server who is already
+//! editing (`editors`) and stops with `files being edited!` when the answer names anyone;
+//! only a clean answer goes on to the notification and the writable bit.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::client::cli;
+use crate::client::commands::notify::{self, FileRef};
 use crate::client::commands::targets::{self, Target};
-use crate::client::commands::{notify, watch};
+use crate::client::commands::watch;
 use crate::client::engine::{CancelToken, Sink};
 use crate::client::error::{Error, Result};
-use crate::client::protocol::{self, Response};
+use crate::client::protocol;
 use crate::client::root::Root;
+use crate::client::work::base;
 use crate::client::work::dir;
-use crate::client::work::entries::Entry;
 
 #[derive(Debug)]
 struct Options {
     /// `-c`: check with the server that nobody else is editing before going ahead.
     check: bool,
-    /// `-f`: the default, kept so a script that names it keeps working.
-    force: bool,
     recursive: bool,
-    /// The `-a` actions, which become the watches field of the notification.
-    actions: Vec<String>,
+    /// `-a` was named at least once; without it all three temporary watches are set.
+    action_given: bool,
+    tedit: bool,
+    tunedit: bool,
+    tcommit: bool,
     names: Vec<String>,
 }
 
@@ -37,17 +45,65 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             check: false,
-            force: false,
             recursive: true,
-            actions: Vec::new(),
+            action_given: false,
+            tedit: false,
+            tunedit: false,
+            tcommit: false,
             names: Vec::new(),
         }
     }
 }
 
-/// Like `add` and `remove`, `edit` stops taking options at the first name. `-c` and `-f` are
-/// opposites; the last one wins, as it does for a script that names both.
-fn parse_args(args: &[String]) -> Result<Options> {
+impl Options {
+    /// The watches field of the notification, always in the protocol's fixed E, U, C order
+    /// (`edit.c:321-327`). `none` really means none.
+    fn watches(&self) -> String {
+        let mut letters = String::new();
+        if self.tedit {
+            letters.push('E');
+        }
+        if self.tunedit {
+            letters.push('U');
+        }
+        if self.tcommit {
+            letters.push('C');
+        }
+        letters
+    }
+
+    fn apply_action(&mut self, action: &str) {
+        self.action_given = true;
+        match action {
+            "edit" => self.tedit = true,
+            "unedit" => self.tunedit = true,
+            "commit" => self.tcommit = true,
+            "all" => {
+                self.tedit = true;
+                self.tunedit = true;
+                self.tcommit = true;
+            }
+            "none" => {
+                self.tedit = false;
+                self.tunedit = false;
+                self.tcommit = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One parsed command line, or the usage the reference prints instead.
+enum Parsed {
+    Options(Options),
+    /// The usage, with the complaint line that goes before it when there is one.
+    Usage(Option<String>),
+}
+
+/// Like `add` and `remove`, `edit` stops taking options at the first name. Short options may
+/// be clustered the way getopt accepts them (`-lR`, `-aedit`). `-c` and `-f` are opposites;
+/// the last one wins.
+fn parse_args(args: &[String]) -> Parsed {
     let mut opts = Options::default();
     let mut i = 0;
     while i < args.len() {
@@ -60,56 +116,59 @@ fn parse_args(args: &[String]) -> Result<Options> {
             opts.names.extend(args[i..].iter().cloned());
             break;
         }
-        match arg.as_str() {
-            "-c" => {
-                opts.check = true;
-                opts.force = false;
-            }
-            "-f" => {
-                opts.force = true;
-                opts.check = false;
-            }
-            "-l" => opts.recursive = false,
-            "-R" => opts.recursive = true,
-            "-a" => {
-                i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or_else(|| Error::aborted("edit", "option -a requires an argument"))?;
-                if watch::action_letters(value).is_none() {
-                    return Err(Error::plain("edit", format!("invalid action '{}'", value)));
+        let cluster: Vec<char> = arg[1..].chars().collect();
+        let mut j = 0;
+        while j < cluster.len() {
+            match cluster[j] {
+                'c' => {
+                    opts.check = true;
+                    j += 1;
                 }
-                opts.actions.push(value.clone());
-            }
-            other => {
-                return Err(Error::plain(
-                    "edit",
-                    format!("invalid option -- '{}'", other),
-                ))
+                'f' => {
+                    // `-f` is the default state; it only undoes an earlier `-c`.
+                    opts.check = false;
+                    j += 1;
+                }
+                'l' => {
+                    opts.recursive = false;
+                    j += 1;
+                }
+                'R' => {
+                    opts.recursive = true;
+                    j += 1;
+                }
+                'a' => {
+                    // The value is the rest of the cluster (`-aedit`) or the next argument.
+                    let value: String = if j + 1 < cluster.len() {
+                        cluster[j + 1..].iter().collect()
+                    } else {
+                        i += 1;
+                        match args.get(i) {
+                            Some(value) => value.clone(),
+                            None => {
+                                return Parsed::Usage(Some(
+                                    "edit: option requires an argument -- a".to_string(),
+                                ))
+                            }
+                        }
+                    };
+                    if watch::action_letters(&value).is_none() {
+                        return Parsed::Usage(None);
+                    }
+                    opts.apply_action(&value);
+                    j = cluster.len();
+                }
+                other => return Parsed::Usage(Some(format!("edit: invalid option -- {}", other))),
             }
         }
         i += 1;
     }
-    Ok(opts)
-}
-
-/// The watches field of the notification: the letters for the `-a` actions, or all three
-/// (`EUC`) when the user named none, which is what the reference sends.
-fn watches(opts: &Options) -> String {
-    let mut letters = String::new();
-    for action in &opts.actions {
-        if let Some(text) = watch::action_letters(action) {
-            for letter in text.chars() {
-                if !letters.contains(letter) {
-                    letters.push(letter);
-                }
-            }
-        }
+    if !opts.action_given {
+        // The reference watches every action when no `-a` is named.
+        opts.apply_action("all");
+        opts.action_given = false;
     }
-    if letters.is_empty() && opts.actions.is_empty() {
-        return "EUC".to_string();
-    }
-    letters
+    Parsed::Options(opts)
 }
 
 /// Run `cvs edit`.
@@ -120,81 +179,217 @@ pub fn run(
     cancel: &CancelToken,
     sink: &mut dyn Sink,
 ) -> Result<i32> {
-    let opts = parse_args(args)?;
+    let opts = match parse_args(args) {
+        Parsed::Options(opts) => opts,
+        Parsed::Usage(complaint) => {
+            if let Some(line) = complaint {
+                sink.err(line);
+            }
+            if let Some(text) = cli::command_help("edit") {
+                sink.err(text.to_string());
+            }
+            return Ok(1);
+        }
+    };
     if !cwd.join("CVS").is_dir() {
         return Err(Error::aborted(
             "edit",
             "there is no version here; run 'cvs checkout' first",
         ));
     }
-
-    let targets = targets::collect(cwd, opts.recursive, &opts.names)?;
-    let files: Vec<(&Target, &Entry)> = notify::selected(&targets)
-        .into_iter()
-        .filter(|(target, entry)| target.dir.local.join(&entry.name).is_file())
+    notify::check_fields("edit", cwd, &[])?;
+    let selection = notify::select_files(cwd, opts.recursive, &opts.names)?;
+    notify::check_fields("edit", cwd, &selection.files)?;
+    // `-n` makes no change of its own, and the reference says nothing about files it would
+    // not touch; the warnings belong with the rest of the local half. A notice left by an
+    // earlier offline run is still sent, as the reference does even under `noexec`.
+    let no_execute = root.options.no_execute;
+    if !no_execute {
+        for name in &selection.missing {
+            sink.err(format!("cvs edit: no such file {}; ignored", name));
+        }
+    }
+    let quiet = root.options.quiet >= 2;
+    let watches = opts.watches();
+    let existing: Vec<FileRef> = selection
+        .files
+        .iter()
+        .filter(|(key, name)| {
+            selection
+                .targets
+                .get(key)
+                .is_some_and(|target| target.dir.local.join(name).is_file())
+        })
+        .cloned()
         .collect();
-    if files.is_empty() {
-        return Err(Error::aborted("edit", "no files to edit"));
-    }
 
-    let mut session = protocol::open(root, "edit", cancel, sink)?;
-    if opts.check && !check_edited(&mut session, &targets, &files, &opts)? {
+    if opts.check {
+        // The check is the only part of the reference's careful form that needs the server,
+        // and it must run before any local change. The notifications go out on the same
+        // connection: the reference does not open a second one, and a test server or a
+        // server that limits connections should not have to see two.
+        let mut session = protocol::open(root, "edit", cancel, sink)?;
+        let check_names = crate::client::work::glob::expand_args(cwd, &opts.names);
+        let clear = check_edited(
+            &mut session,
+            &selection.targets,
+            &existing,
+            &check_names,
+            quiet,
+            cwd,
+        )?;
+        if !clear {
+            session.close();
+            return Err(Error::aborted("edit", "Files being edited!"));
+        }
+        if !no_execute {
+            // The local half has no connection of its own to write to, so its warnings go
+            // through the open session's sink.
+            let mut bridge = SessionSink {
+                session: &mut session,
+            };
+            apply_local_edits(
+                &selection.targets,
+                &selection.files,
+                &watches,
+                cwd,
+                &mut bridge,
+            )?;
+        }
+        notify::send_pending(&mut session, &selection.targets)?;
         session.close();
-        return Err(Error::aborted("edit", "files being edited!"));
+        return Ok(0);
     }
 
-    let watches = watches(&opts);
-    let mut notices = Vec::new();
-    for (target, entry) in &files {
-        let local = target.dir.local.join(&entry.name);
-        // The base is what `unedit` puts back when the user says to revert.
-        crate::client::work::base::save(&target.dir.local, &entry.name, &entry.revision)?;
-        dir::clear_readonly(&local).ok();
-        notices.push(notify::Notice {
-            dir: target.dir.update_dir.clone(),
-            name: entry.name.clone(),
-            kind: 'E',
-            watches: watches.clone(),
-        });
+    if !no_execute {
+        apply_local_edits(&selection.targets, &selection.files, &watches, cwd, sink)?;
     }
-    notify::send(&mut session, &targets, &notices, cwd)?;
-    let _ = targets::read_text(&mut session, false)?;
+    let mut session = protocol::open(root, "edit", cancel, sink)?;
+    notify::send_pending(&mut session, &selection.targets)?;
     session.close();
     Ok(0)
 }
 
-/// `-c`: send the file blocks and one `editors` request per file. Returns true when nobody
-/// else is editing; false has already sent the closing `noop` and leaves the stop to the
-/// caller.
+/// A sink that sends the local half's warnings through the session that is already open.
+/// `-c` has to keep its connection while it makes the edit, so the ordinary sink is still
+/// borrowed by the session.
+struct SessionSink<'a, 'b> {
+    session: &'a mut protocol::Session<'b>,
+}
+
+impl Sink for SessionSink<'_, '_> {
+    fn out(&mut self, line: String) {
+        self.session.out(line);
+    }
+
+    fn err(&mut self, line: String) {
+        self.session.err(line);
+    }
+
+    fn confirm(&mut self, text: String) -> bool {
+        self.session.confirm(text)
+    }
+}
+
+/// The reference's local half, in its order: queue the notice, make the working file
+/// writable, then keep the writable copy (`edit.c:312-362`). A file that is gone is only
+/// reported, as `edit.c:306-310` does.
+fn apply_local_edits(
+    targets: &BTreeMap<String, Target>,
+    files: &[FileRef],
+    watches: &str,
+    cwd: &Path,
+    sink: &mut dyn Sink,
+) -> Result<()> {
+    for (key, name) in files {
+        let target = targets.get(key).ok_or_else(|| {
+            Error::aborted(
+                "edit",
+                format!("the folder '{}' is missing from the selection", key),
+            )
+        })?;
+        let local = target.dir.local.join(name);
+        if !local.is_file() {
+            sink.err(format!(
+                "cvs edit: no such file {}; ignored",
+                dir::display_path(&target.dir.update_dir, name)
+            ));
+            continue;
+        }
+        notify::queue("edit", &target.dir.local, 'E', name, watches, cwd)?;
+        if let Err(error) = dir::clear_readonly(&local) {
+            // The reference warns and carries on: the server notice and the base are still
+            // worth having, and the next command can retry the bit.
+            sink.err(format!(
+                "cvs edit: cannot change mode of file {}: {}",
+                dir::display_path(&target.dir.update_dir, name),
+                error
+            ));
+        }
+        let revision = target
+            .entries
+            .file(name)
+            .map(|entry| entry.revision.clone());
+        base::save(&target.dir.local, name, revision.as_deref())?;
+    }
+    Ok(())
+}
+
+/// `-c`: send the file blocks and one `editors` request per file, reading each answer before
+/// the next name (the server resets its argument list after every request). Returns true when
+/// nobody else is editing; false has already sent the closing `noop` and leaves the stop to
+/// the caller.
 fn check_edited(
     session: &mut protocol::Session,
     targets: &BTreeMap<String, Target>,
-    files: &[(&Target, &Entry)],
-    opts: &Options,
+    files: &[FileRef],
+    names: &[String],
+    quiet: bool,
+    cwd: &Path,
 ) -> Result<bool> {
-    if !opts.recursive {
-        session.argument("-l")?;
-    }
+    // CVSNT's check_edits sends `--` before the file names (`send_arg ("--")`).
+    targets::begin_files(session, names)?;
     let _ = targets::send_blocks_watch(session, targets)?;
-    for (target, entry) in files {
-        let name = dir::display_path(&target.dir.update_dir, &entry.name);
-        session.argument(&name)?;
-        session.send("editors")?;
+    // `send_files` returns the server to the invocation folder before the names go out
+    // (`client.c:5634-5643`). Without this, files in more than one folder would all be
+    // looked up below the last folder block instead of below the invocation folder.
+    if let Some(repository) = dir::read_repository(cwd) {
+        let absolute = dir::absolute_repository(session.root.protocol_root(), &repository);
+        session.directory(".", &absolute, cwd)?;
     }
-    session.flush()?;
 
     let mut edited = false;
-    for _ in 0..files.len() {
+    for (key, name) in files {
+        let target = targets.get(key).ok_or_else(|| {
+            Error::aborted(
+                "edit",
+                format!("the folder '{}' is missing from the selection", key),
+            )
+        })?;
+        let shown = dir::display_path(&target.dir.update_dir, name);
+        session.argument(&shown)?;
+        session.send("editors")?;
+        session.flush()?;
         loop {
             match session.read_response()? {
-                Response::Ok => break,
-                Response::M(text) => {
+                protocol::Response::Ok => break,
+                protocol::Response::M(text) => {
+                    // `editors` answers one line per editor, starting with the file's
+                    // `update_dir/name`. CVSNT's check counts only the file it asked about.
+                    let first = text.split('\t').next().unwrap_or("");
+                    if !first.eq_ignore_ascii_case(&shown) {
+                        continue;
+                    }
                     edited = true;
-                    session.out(text);
+                    if !quiet {
+                        session.out(text);
+                    }
                 }
-                Response::E(text) => session.err(text),
-                Response::Notified | Response::Trace(_) | Response::Checksum(_) => {}
-                Response::Error { message, .. } => {
+                protocol::Response::E(text) => session.err(text),
+                protocol::Response::Notified
+                | protocol::Response::Trace(_)
+                | protocol::Response::Checksum(_) => {}
+                protocol::Response::Error { message, .. } => {
                     return Err(Error::aborted(
                         "edit",
                         if message.trim().is_empty() {
@@ -230,7 +425,10 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Options> {
-        parse_args(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>())
+        match parse_args(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()) {
+            Parsed::Options(opts) => Ok(opts),
+            Parsed::Usage(line) => Err(Error::new(line.unwrap_or_else(|| "usage".to_string()))),
+        }
     }
 
     #[test]
@@ -245,24 +443,41 @@ mod tests {
     fn the_last_of_c_and_f_wins() {
         let opts = parse(&["-c", "-f"]).unwrap();
         assert!(!opts.check);
-        assert!(opts.force);
 
         let opts = parse(&["-f", "-c"]).unwrap();
         assert!(opts.check);
-        assert!(!opts.force);
     }
 
     #[test]
-    fn an_action_may_be_repeated_and_is_kept_in_order() {
+    fn short_options_may_be_clustered() {
+        let opts = parse(&["-lR", "-aedit", "a.txt"]).unwrap();
+        assert!(opts.recursive);
+        assert_eq!(opts.watches(), "E");
+        assert_eq!(opts.names, vec!["a.txt"]);
+
+        let opts = parse(&["-lRa", "unedit", "a.txt"]).unwrap();
+        assert!(opts.recursive);
+        assert_eq!(opts.watches(), "U");
+    }
+
+    #[test]
+    fn actions_keep_the_fixed_e_u_c_order() {
         let opts = parse(&["-a", "unedit", "-a", "edit", "a.txt"]).unwrap();
-        assert_eq!(opts.actions, vec!["unedit", "edit"]);
-        assert_eq!(watches(&opts), "UE");
+        assert_eq!(opts.watches(), "EU");
+    }
+
+    #[test]
+    fn none_clears_the_actions_named_before_it() {
+        let opts = parse(&["-a", "all", "-a", "none", "a.txt"]).unwrap();
+        assert_eq!(opts.watches(), "");
+        let opts = parse(&["-a", "edit", "-a", "none", "-a", "unedit", "a.txt"]).unwrap();
+        assert_eq!(opts.watches(), "U");
     }
 
     #[test]
     fn no_action_means_all_three_watches() {
         let opts = parse(&["a.txt"]).unwrap();
-        assert_eq!(watches(&opts), "EUC");
+        assert_eq!(opts.watches(), "EUC");
     }
 
     #[test]
@@ -278,19 +493,83 @@ mod tests {
             .unwrap_err()
             .text()
             .contains("invalid option"));
+        assert!(!parse(&["-Z"]).unwrap_err().text().contains("-- -Z"));
         assert!(parse(&["-a", "bogus"])
             .unwrap_err()
             .text()
-            .contains("invalid action"));
+            .contains("usage"));
     }
 
     #[test]
     fn a_missing_action_is_refused() {
         let error = parse(&["-a"]).unwrap_err();
         assert!(
-            error.text().contains("option -a requires an argument"),
+            error.text().contains("option requires an argument -- a"),
             "{}",
             error
         );
+    }
+
+    #[test]
+    fn a_read_only_file_gets_a_writable_base_and_a_queued_notice() {
+        use crate::client::work::codec::{self, Codec};
+        use crate::client::work::dir::WorkingDir;
+        use crate::client::work::entries::Entries;
+
+        let folder = std::env::temp_dir().join(format!(
+            "cvsdesk-edit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(folder.join("CVS")).unwrap();
+        std::fs::write(folder.join("a.txt"), b"base\n").unwrap();
+        dir::set_readonly(&folder.join("a.txt"), true).unwrap();
+
+        let mut entries = Entries::default();
+        entries.set_file(crate::client::work::entries::Entry::new(
+            "a.txt", "1.1", "", "", "",
+        ));
+        entries.write(&folder, Codec::Utf8).unwrap();
+        let dir = WorkingDir::new(
+            folder.clone(),
+            String::new(),
+            "mod".to_string(),
+            Codec::Utf8,
+        );
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            String::new(),
+            Target {
+                dir,
+                entries,
+                filter: Vec::new(),
+                selected: true,
+                loose: Vec::new(),
+            },
+        );
+        let files: Vec<FileRef> = vec![(String::new(), "a.txt".to_string())];
+        let mut sink = crate::client::engine::test_sink::RecordingSink::default();
+        apply_local_edits(&targets, &files, "EUC", &folder, &mut sink).unwrap();
+
+        assert!(!std::fs::metadata(folder.join("a.txt"))
+            .unwrap()
+            .permissions()
+            .readonly());
+        let saved = folder.join("CVS").join("Base").join("a.txt");
+        assert_eq!(std::fs::read(&saved).unwrap(), b"base\n");
+        assert!(
+            !std::fs::metadata(&saved).unwrap().permissions().readonly(),
+            "the base is a writable copy"
+        );
+        let codec = codec::for_dir(&folder);
+        let notice = codec.decode(&std::fs::read(folder.join("CVS").join("Notify")).unwrap());
+        assert!(notice.starts_with("Ea.txt\t"), "{}", notice);
+        assert!(notice.trim_end().ends_with("\tEUC"), "{}", notice);
+        let baserev = codec.decode(&std::fs::read(folder.join("CVS").join("Baserev")).unwrap());
+        assert!(baserev.contains("Ba.txt/1.1/"), "{}", baserev);
+        std::fs::remove_dir_all(&folder).ok();
     }
 }

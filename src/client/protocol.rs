@@ -46,6 +46,7 @@ pub const VALID_RESPONSES: &[&str] = &[
     "Created",
     "Update-existing",
     "Merged",
+    "Patched",
     "Mode",
     "Mod-time",
     "Removed",
@@ -124,7 +125,13 @@ pub enum Response {
         repository: String,
         entry: String,
     },
-    NewEntry(String),
+    /// `New-entry <dir>/` + repository/file + Entries line: a file's entry changed but its
+    /// contents did not travel.
+    NewEntry {
+        update_dir: String,
+        repository: String,
+        entry: String,
+    },
     F(String),
     /// A CVSNT GUI trace line (`MT …`): no output, no state change.
     Trace(String),
@@ -218,6 +225,32 @@ impl<'a> Session<'a> {
             }
         }
 
+        // Global options go to the server before any behaviour request, as the reference
+        // client sends them (client.c:4501-4552). A server without `Global_option` gets a
+        // warning and the command still runs.
+        let flags = session.root.options.clone();
+        if flags.no_execute || flags.quiet > 0 || flags.readonly || flags.trace {
+            if session.supports("Global_option") {
+                if flags.no_execute {
+                    session.send("Global_option -n")?;
+                }
+                if flags.quiet >= 2 {
+                    session.send("Global_option -Q")?;
+                } else if flags.quiet == 1 {
+                    session.send("Global_option -q")?;
+                }
+                if flags.readonly {
+                    session.send("Global_option -r")?;
+                }
+                if flags.trace {
+                    session.send("Global_option -t")?;
+                }
+                session.flush()?;
+            } else {
+                session.err("This server does not support the global options.".to_string());
+            }
+        }
+
         // Tell the server how the client will behave. `UseUnchanged` makes it possible to say
         // "this file is unchanged" without sending its contents.
         session.send("UseUnchanged")?;
@@ -244,7 +277,7 @@ impl<'a> Session<'a> {
         // `-z`: the reference enables compression after those plain behaviour requests and
         // before any command option, so the first compressed line is the folder block. A
         // server without the capability gets a plain stream and a note.
-        let level = session.root.compression;
+        let level = session.root.options.compression;
         if level > 0 {
             if session.supports("Gzip-stream") {
                 session.send(&format!("Gzip-stream {}", level))?;
@@ -262,6 +295,11 @@ impl<'a> Session<'a> {
 
     pub fn supports(&self, name: &str) -> bool {
         self.capabilities.iter().any(|cap| cap == name)
+    }
+
+    /// `-n`: the command must not change the disk, locally or on the server.
+    pub fn no_execute(&self) -> bool {
+        self.root.options.no_execute
     }
 
     /// Write one line where the caller's stdout goes: an `M` response or a command report.
@@ -377,7 +415,18 @@ impl<'a> Session<'a> {
                 repository: self.extra_line()?,
                 entry: self.extra_line()?,
             },
-            "New-entry" => Response::NewEntry(self.extra_line()?),
+            "New-entry" => {
+                // The server writes the folder, then the repository/file line, then the Entries
+                // line (server.c:3559-3575,3820-3824).
+                let update_dir = rest.to_string();
+                let repository = self.extra_line()?;
+                let entry = self.extra_line()?;
+                Response::NewEntry {
+                    update_dir,
+                    repository,
+                    entry,
+                }
+            }
             "Mode" => Response::Mode(rest.to_string()),
             "Mod-time" => Response::ModTime(rest.to_string()),
             "Removed" => {
@@ -477,6 +526,15 @@ impl<'a> Session<'a> {
                 format!("the server sent a bad file length: {}", length_text),
             )
         })?;
+        // A corrupt or out-of-step stream must not make the client allocate gigabytes. The
+        // protocol has no legitimate file this large in a working copy.
+        const MAX_FILE: usize = 512 * 1024 * 1024;
+        if length > MAX_FILE {
+            return Err(Error::aborted(
+                &self.command,
+                format!("the server sent an impossible file length: {}", length),
+            ));
+        }
         let content = self.conn.read_exact(length).map_err(|e| self.io_error(e))?;
         Ok(Response::File {
             kind,
@@ -528,6 +586,12 @@ impl<'a> Session<'a> {
 
     /// `cvs version`: the server answers with one `M` line carrying its own banner.
     pub fn version(&mut self) -> Result<String> {
+        // Old servers have no `version` request: the reference sends `noop` and prints
+        // `(unknown)` instead of failing (version.c:74-80).
+        if !self.supports("version") {
+            let _ = self.simple("noop")?;
+            return Ok("(unknown)".to_string());
+        }
         self.send("version")?;
         self.flush()?;
         let mut server = String::new();

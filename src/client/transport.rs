@@ -182,9 +182,22 @@ impl Connection {
     /// One protocol line, without its line ending. `None` means the server closed the pipe.
     pub fn read_line(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut line = Vec::new();
-        let read = self.reader.read_until(b'\n', &mut line)?;
+        // A protocol line is far shorter than this; the limit keeps a corrupt stream from
+        // growing without bound.
+        const MAX_LINE: u64 = 1024 * 1024;
+        let read = self
+            .reader
+            .by_ref()
+            .take(MAX_LINE + 1)
+            .read_until(b'\n', &mut line)?;
         if read == 0 {
             return Ok(None);
+        }
+        if line.len() as u64 > MAX_LINE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "protocol line is too long",
+            ));
         }
         if line.last() == Some(&b'\n') {
             line.pop();
@@ -204,6 +217,14 @@ impl Connection {
 
     /// Exactly `count` bytes, for file contents that follow a length line.
     pub fn read_exact(&mut self, count: usize) -> io::Result<Vec<u8>> {
+        // A corrupt or out-of-step stream can name an enormous block; never allocate it.
+        const MAX_BLOCK: usize = 512 * 1024 * 1024;
+        if count > MAX_BLOCK {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("impossible block size: {}", count),
+            ));
+        }
         let mut bytes = vec![0u8; count];
         self.reader.read_exact(&mut bytes)?;
         Ok(bytes)
