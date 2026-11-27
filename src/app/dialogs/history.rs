@@ -15,6 +15,7 @@ use cvsdesk::truncate_columns;
 
 use super::DialogAction;
 use crate::app::history_preview::{self, Loader, Msg, Target};
+use crate::app::ui::typography::small_monospace;
 
 const SELECTED_BG: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xF0, 0xFE);
 const HOVER_BG: egui::Color32 = egui::Color32::from_rgb(0xF5, 0xF8, 0xFC);
@@ -812,7 +813,7 @@ fn list(ui: &mut egui::Ui, state: &mut HistoryState, visible: &[usize], height: 
 
                 draw_lanes(&painter, rect, row, lane, &trunk_rows, &branch_ranges);
 
-                let mono = egui::FontId::new(11.0, egui::FontFamily::Monospace);
+                let mono = small_monospace();
                 let small = egui::TextStyle::Small.resolve(ui.style());
                 let body = egui::TextStyle::Body.resolve(ui.style());
                 let y = rect.center().y;

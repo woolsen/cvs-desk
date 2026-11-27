@@ -11,7 +11,7 @@
 use egui::{FontFamily, FontId, TextStyle};
 
 /// Hints and the output pane's line count.
-pub const SMALL: f32 = 11.0;
+pub const SMALL: f32 = 12.0;
 /// Running text: menus, file rows, dialogs and the status bar.
 pub const BODY: f32 = 13.0;
 /// The console and other fixed-pitch text (CVSROOT, settings paths).
