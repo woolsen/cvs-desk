@@ -2,8 +2,7 @@
 //!
 //! CVSNT writes `Entries`, `Root` and `Repository` in the console's code page, not UTF-8.
 //! A Chinese Windows uses 936 (GBK), and a real working copy proves it: its `Entries` bytes
-//! are not valid UTF-8. The client therefore has to *encode* as well as decode — the GUI-only
-//! table in `core/text.rs` is decode-only.
+//! are not valid UTF-8. The client therefore has to *encode* as well as decode.
 //!
 //! A new working copy gets the system's ANSI code page (936 on a Chinese Windows), which is
 //! what CVSNT would write. An existing working copy keeps whatever its `Entries` already

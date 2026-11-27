@@ -66,7 +66,7 @@ fn the_real_entries_file_is_not_utf8() {
     assert!(!decoded.was_utf8, "the reader must notice it is not UTF-8");
     assert_eq!(
         decoded.replaced, 0,
-        "every byte of the real Entries file must have a character; {} did not",
+        "the real Entries file must decode without replacement; {} mark(s) appeared",
         decoded.replaced
     );
     assert!(

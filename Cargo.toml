@@ -26,7 +26,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 chrono = "0.4"
 rfd = "0.18.0"
 # The cvs client writes control files in the working copy's own code page (GBK here), so it
-# needs exact decoding *and* encoding; the GUI table is decode-only.
+# needs to decode and encode names in that code page.
 encoding_rs = "0.8"
 # Finds the face index inside a .ttc and tells whether a face covers a character.
 ttf-parser = "0.25"

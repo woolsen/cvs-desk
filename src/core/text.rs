@@ -6,55 +6,19 @@
 //! valid UTF-8. Read as UTF-8, every Chinese letter becomes a replacement mark, the name
 //! matches no file on disk, and the file list shows the wrong state.
 //!
-//! The two-byte table in `gbk_table.bin` is generated from Python's own `gbk` codec by
-//! `gen_gbk.py`, so the mapping is exact rather than approximated. It is compiled in, so no
-//! file has to be shipped beside the program.
-//!
-//! What this does *not* do is guess. A byte pair with no character becomes U+FFFD and is
-//! counted, because a wrong filename is worse than a visible gap: a wrong name silently
-//! matches nothing, while a replacement mark can be seen.
+//! Decoding uses the same `encoding_rs` GBK decoder as the client. That decoder is the
+//! Encoding Standard's GBK decoder, which also accepts GB18030's four-byte sequences. A byte
+//! sequence it cannot use becomes U+FFFD and is counted, because a wrong filename is worse
+//! than a visible gap: a wrong name silently matches nothing, while a replacement mark can be
+//! seen. For the 101 two-byte slots where Windows CP936 returns a private-use character and
+//! GB18030 assigns a standard one, the standard character wins (for example `A2 E3` is the
+//! euro sign here, but U+E76C on Windows), so a legacy file named with that private-use
+//! character can fail to match its `Entries` name.
 
-/// The exact GBK table: one u16 per (lead, trail) pair, indexed by `index()`.
-static GBK: &[u8] = include_bytes!("gbk_table.bin");
-
-/// Trails run 0x40..=0xFE, skipping 0x7F, so there are 190 of them.
-const TRAILS: usize = 0xFF - 0x40 - 1;
-
-fn index(lead: u8, trail: u8) -> Option<usize> {
-    if !(0x81..=0xFE).contains(&lead) {
-        return None;
-    }
-    if !(0x40..=0xFE).contains(&trail) || trail == 0x7F {
-        return None;
-    }
-    // Trails below 0x7F occupy positions 0..=62, those above start at 63.
-    let t = if trail < 0x7F {
-        (trail - 0x40) as usize
-    } else {
-        (trail - 0x40 - 1) as usize
-    };
-    let i = (lead as usize - 0x81) * TRAILS + t;
-    if i * 2 + 1 < GBK.len() {
-        Some(i)
-    } else {
-        None
-    }
-}
-
-/// The code point for a two-byte GBK pair, or `None` when the pair has no character.
-pub fn gbk_char(lead: u8, trail: u8) -> Option<char> {
-    let i = index(lead, trail)?;
-    let cp = u16::from_le_bytes([GBK[i * 2], GBK[i * 2 + 1]]) as u32;
-    if cp == 0 {
-        None
-    } else {
-        char::from_u32(cp)
-    }
-}
-
-/// A run of bytes decoded to text, plus how many bytes had no mapping.
+/// A run of bytes decoded to text, plus how many replacement marks it needed.
 pub struct Decoded {
     pub text: String,
+    /// How many replacement marks the decoder produced.
     pub replaced: usize,
     /// True when the bytes were valid UTF-8 and were decoded as such.
     pub was_utf8: bool,
@@ -69,7 +33,7 @@ impl Decoded {
             Some("read as GBK (code page 936)".to_string())
         } else {
             Some(format!(
-                "read as GBK; {} byte(s) had no character",
+                "read as GBK; {} character(s) could not be decoded",
                 self.replaced
             ))
         }
@@ -88,32 +52,17 @@ pub fn decode(bytes: &[u8]) -> Decoded {
     }
 }
 
-/// Decode as GBK (code page 936). ASCII passes through unchanged; a lead/trail pair is looked
-/// up in the exact table; anything with no meaning becomes U+FFFD and is counted.
+/// Decode as GBK (code page 936). ASCII passes through unchanged; a sequence the decoder
+/// cannot use becomes U+FFFD and is counted.
 pub fn decode_gbk(bytes: &[u8]) -> Decoded {
-    let mut text = String::with_capacity(bytes.len());
-    let mut replaced = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b < 0x80 {
-            text.push(b as char);
-            i += 1;
-            continue;
-        }
-        if i + 1 < bytes.len() {
-            if let Some(c) = gbk_char(b, bytes[i + 1]) {
-                text.push(c);
-                i += 2;
-                continue;
-            }
-        }
-        text.push('\u{FFFD}');
-        replaced += 1;
-        i += 1;
-    }
+    let (text, had_errors) = encoding_rs::GBK.decode_without_bom_handling(bytes);
+    let replaced = if had_errors {
+        text.matches('\u{FFFD}').count()
+    } else {
+        0
+    };
     Decoded {
-        text,
+        text: text.into_owned(),
         replaced,
         was_utf8: false,
     }
@@ -163,9 +112,11 @@ mod tests {
     }
 
     #[test]
-    fn trail_byte_0x7f_has_no_character() {
-        assert!(gbk_char(0x81, 0x7F).is_none());
-        assert!(gbk_char(0x81, 0x40).is_some());
+    fn an_invalid_trail_byte_is_counted_once() {
+        // 0x7F is not a valid trail byte, so the lead becomes U+FFFD and the 0x7F stays as DEL.
+        let d = decode_gbk(&[0x81, 0x7F]);
+        assert_eq!(d.text, "\u{FFFD}\u{7F}");
+        assert_eq!(d.replaced, 1);
     }
 
     #[test]
@@ -173,5 +124,41 @@ mod tests {
         let d = decode(&[0xD6, 0xD0]);
         assert!(d.note().unwrap().contains("GBK"));
         assert!(decode(b"abc").note().is_none());
+
+        let d = decode_gbk(&[0x81, 0x7F]);
+        assert!(d.note().unwrap().contains("could not be decoded"));
+    }
+
+    #[test]
+    fn windows_user_defined_area_is_decoded() {
+        // 0xAA 0xA1 is the first slot of CP936's user-defined area, which Windows maps to
+        // U+E000. Python's `gbk` codec rejects it, but a Windows-written name may use it.
+        let d = decode_gbk(&[0xAA, 0xA1]);
+        assert_eq!(d.text, "\u{E000}");
+        assert_eq!(d.replaced, 0);
+    }
+
+    #[test]
+    fn gbk_extension_range_is_decoded() {
+        // 0x81 0x40 is the first pair of the GBK extension area, "丂"; the old table covered
+        // this range too, and the test locks it in after the table's removal.
+        let d = decode_gbk(&[0x81, 0x40]);
+        assert_eq!(d.text, "\u{4E02}");
+        assert_eq!(d.replaced, 0);
+    }
+
+    #[test]
+    fn four_byte_gb18030_sequence_is_decoded() {
+        // The decoder also accepts GB18030's four-byte form: "ђ".
+        let d = decode_gbk(&[0x81, 0x30, 0xD3, 0x30]);
+        assert_eq!(d.text, "\u{0452}");
+        assert_eq!(d.replaced, 0);
+    }
+
+    #[test]
+    fn gb18030_extension_slot_is_decoded() {
+        // GB18030 assigns the euro sign to 0xA2 0xE3; Windows CP936 maps the slot to the
+        // private-use U+E76C instead. The standard assignment wins here.
+        assert_eq!(decode_gbk(&[0xA2, 0xE3]).text, "€");
     }
 }

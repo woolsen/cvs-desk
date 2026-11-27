@@ -48,7 +48,6 @@ Run `cargo fmt` before sending a pull request. CI also runs `cargo fmt --check`,
 - `src/client/` holds the CVS protocol and working-copy implementation used by the `cvs`
   program.
 - `src/app/` is the egui window. Keep it a thin layer; do not put rules there.
-- `tools/gen_gbk.py` regenerates `src/core/gbk_table.bin`. Do not edit the binary by hand.
 - UI text is English. Do not add another language until the project has a translation layer.
 - CVS control files are read through `core::text::decode`, because they may be GBK rather than
   UTF-8.

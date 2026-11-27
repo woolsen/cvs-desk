@@ -8,7 +8,7 @@ Each rule lives in its own module with its tests beside it.
 
 | Module | What its tests check |
 |---|---|
-| `core/text.rs` | UTF-8 passes through, GBK is recognised, the same text in either encoding comes out equal, and an unmapped byte is counted rather than swallowed |
+| `core/text.rs` | UTF-8 passes through, GBK is recognised, the same text in either encoding comes out equal, and a sequence that cannot be decoded is counted rather than swallowed |
 | `core/entries.rs` | the file-state rule, the 24-character timestamp compare, the day-column rule, and every known date shape |
 | `core/prefs.rs` | the TOML settings round-trip, the old text file still loads, and remembered names stay newest-first without duplicates |
 | `core/graph.rs` | one node per revision, branches hang off a trunk revision, and one lane per branch |
