@@ -11,6 +11,7 @@ pub(super) fn show(ctx: &egui::Context, text: &mut String, cvsroot: &str) -> Opt
     let mut action = None;
     egui::Window::new("Command Line")
         .open(&mut open)
+        .drag_area(egui::WindowDrag::Anywhere)
         .collapsible(false)
         .resizable(true)
         .default_width(520.0)

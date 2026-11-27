@@ -16,6 +16,7 @@ pub(super) fn show(
     let mut action = None;
     egui::Window::new("Preferences")
         .open(&mut open)
+        .drag_area(egui::WindowDrag::Anywhere)
         .collapsible(false)
         .resizable(true)
         .default_width(560.0)

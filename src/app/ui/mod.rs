@@ -17,15 +17,30 @@ pub(super) mod wrap;
 
 impl App {
     /// Draw the whole window: menu, file list, output pane and status bar.
-    pub(super) fn ui_frame(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        self.ui_menu(ctx, frame);
-        self.ui_status_bar(ctx);
-        self.ui_output(ctx);
-        egui::CentralPanel::default().show(ctx, |ui| {
+    pub(super) fn ui_frame(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        self.ui_menu(ui, frame);
+        self.ui_status_bar(ui);
+        self.ui_output(ui);
+        egui::CentralPanel::default().show(ui, |ui| {
             self.ui_file_list(ui);
         });
-        self.ui_dialogs(ctx);
+        self.ui_dialogs(ui.ctx());
     }
+}
+
+/// Run one headless pass in a test, dropping the font-atlas delta on purpose.
+///
+/// egui 0.37 panics when a `TexturesDelta` is dropped unapplied. A real integration
+/// uploads it; these tests only read shapes, so there is nothing to upload.
+#[cfg(test)]
+pub(super) fn test_run(
+    ctx: &egui::Context,
+    input: egui::RawInput,
+    mut add_contents: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let mut output = ctx.run_ui(input, |ui| add_contents(ui));
+    output.textures_delta.clear();
+    output
 }
 
 fn state_color(s: State) -> egui::Color32 {

@@ -75,6 +75,8 @@ pub fn install(ctx: &egui::Context) {
 mod tests {
     use super::*;
 
+    use crate::app::ui::test_run;
+
     #[test]
     fn a_dialog_title_sits_one_step_above_body_text() {
         assert_eq!(HEADING, 14.0);
@@ -101,8 +103,8 @@ mod tests {
                 ui.label(egui::RichText::new("Heading text").text_style(egui::TextStyle::Heading));
             });
         };
-        let _ = ctx.run(input.clone(), &draw);
-        let output = ctx.run(input, draw);
+        let _ = test_run(&ctx, input.clone(), |_| draw(&ctx));
+        let output = test_run(&ctx, input, |_| draw(&ctx));
 
         let heights = text_heights(&output);
         let height = |text: &str| {
@@ -155,7 +157,10 @@ mod tests {
         // The window follows the system theme, so the light style is the one a
         // light Windows actually draws with.
         ctx.set_theme(egui::Theme::Light);
-        assert_eq!(ctx.style().text_styles[&TextStyle::Heading].size, HEADING);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Light).text_styles[&TextStyle::Heading].size,
+            HEADING
+        );
     }
 
     fn text_heights(output: &egui::FullOutput) -> Vec<(String, f32)> {

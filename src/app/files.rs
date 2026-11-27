@@ -73,7 +73,7 @@ impl Filters {
 
 /// The search box's stable id, so Esc can find the field.
 pub(super) fn search_id() -> egui::Id {
-    egui::Id::new("file-search")
+    egui::Id::unique("file-search")
 }
 
 /// What the search box is looking for: a case-insensitive substring, or - when the text

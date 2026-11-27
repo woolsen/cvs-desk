@@ -1,6 +1,7 @@
 //! The `--screenshot` harness: ask egui for a frame and save it.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::app::App;
 
@@ -8,18 +9,16 @@ pub(super) struct ShotJob {
     pub(super) path: PathBuf,
     pub(super) frames: u32,
     pub(super) requested: bool,
+    /// Filled by the screenshot callback; taken on the next frame.
+    pub(super) image: Arc<Mutex<Option<egui::ColorImage>>>,
 }
 
 impl App {
     pub(super) fn shot_tick(&mut self, ctx: &egui::Context) {
         let mut save: Option<egui::ColorImage> = None;
-        ctx.input(|i| {
-            for ev in &i.events {
-                if let egui::Event::Screenshot { image, .. } = ev {
-                    save = Some(image.as_ref().clone());
-                }
-            }
-        });
+        if let Some(job) = &self.shot {
+            save = job.image.lock().ok().and_then(|mut slot| slot.take());
+        }
 
         if let Some(img) = save {
             if let Some(job) = &self.shot {
@@ -58,7 +57,14 @@ impl App {
             ctx.request_repaint();
             if job.frames >= 120 && !job.requested {
                 job.requested = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+                let slot = job.image.clone();
+                let repaint = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = Some((*image).clone());
+                    }
+                    repaint.request_repaint();
+                });
             }
         }
     }

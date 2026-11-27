@@ -10,6 +10,7 @@ pub(super) fn show(ctx: &egui::Context, file: &str, nodes: &[RevNode]) -> Option
     let mut action = None;
     egui::Window::new(format!("Graph — {}", file))
         .open(&mut open)
+        .drag_area(egui::WindowDrag::Anywhere)
         .collapsible(false)
         .resizable(true)
         .default_width(680.0)

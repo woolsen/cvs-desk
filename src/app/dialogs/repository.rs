@@ -143,7 +143,7 @@ fn builder(ui: &mut egui::Ui, root: &mut String) {
     ui.collapsing("Build a new connection…", |ui| {
         ui.horizontal(|ui| {
             ui.label("Connection:");
-            egui::ComboBox::from_id_salt(ui.id().with("kind"))
+            egui::ComboBox::from_id_salt(ui.scope_id().with("kind"))
                 .selected_text(parts.kind.label())
                 .show_ui(ui, |ui| {
                     for kind in ConnKind::ALL {

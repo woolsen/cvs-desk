@@ -5,8 +5,8 @@ use crate::app::{App, Trouble};
 use super::state_color;
 
 impl App {
-    pub(super) fn ui_status_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+    pub(super) fn ui_status_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.loading.is_some() {
                     ui.label(egui::RichText::new("Reading folder…").weak());

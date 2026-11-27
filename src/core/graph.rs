@@ -592,9 +592,12 @@ mod tests {
             )),
             ..Default::default()
         };
-        ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| draw(ui, nodes, 600.0, ROW_H));
-        })
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| draw(ui, nodes, 600.0, ROW_H));
+        });
+        // The test only reads the shapes; the font atlas delta belongs to an integration.
+        output.textures_delta.clear();
+        output
     }
 
     enum Drawn {

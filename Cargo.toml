@@ -18,10 +18,12 @@ name = "cvsdesk"
 path = "src/lib.rs"
 
 [dependencies]
-eframe = "0.29"
-egui = "0.29"
+eframe = "0.37"
+egui = { version = "0.37", features = ["default_fonts"] }
 # Remix Icon as a font: the browser's file-type icons, with no image assets to ship.
-egui-remixicon = "0.29.1"
+# The crate has no 0.37 release, but the font and the icon constants do not depend on
+# egui; turning its `egui` feature off lets the same assets ride along with egui 0.37.
+egui-remixicon = { version = "0.34.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
 chrono = "0.4"
 rfd = "0.18.0"

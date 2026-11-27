@@ -96,6 +96,9 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        // The program installs the system fonts itself (`app::ui::fonts`); letting egui
+        // add its own on-demand fallback would change that chain behind the tests' back.
+        system_font_fallback: false,
         ..Default::default()
     };
 

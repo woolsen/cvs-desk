@@ -56,6 +56,7 @@ pub(super) fn show(
     let mut action = None;
     egui::Window::new("Tags")
         .open(&mut open)
+        .drag_area(egui::WindowDrag::Anywhere)
         .collapsible(false)
         .resizable(true)
         .default_width(580.0)

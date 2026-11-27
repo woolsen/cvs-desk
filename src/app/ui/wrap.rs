@@ -33,18 +33,17 @@ pub(crate) fn label_in(
 
 /// The room `text` takes in `font`, the same measure egui lays a label out with.
 fn width_of(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
-    ui.fonts(|fonts| {
-        fonts
-            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::PLACEHOLDER)
-            .size()
-            .x
-    })
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::PLACEHOLDER)
+        .size()
+        .x
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::ui::fonts;
+    use crate::app::ui::test_run;
 
     const PATH: &str = r"D:\example\projects\示例项目\repos\cvs\SourceCode\src";
 
@@ -66,8 +65,8 @@ mod tests {
 
     /// The room the whole line takes, so a test can talk about a row half its size.
     fn natural_width(ctx: &egui::Context) -> f32 {
-        let font = egui::TextStyle::Body.resolve(&ctx.style());
-        ctx.fonts(|fonts| {
+        let font = egui::TextStyle::Body.resolve(&ctx.style_of(egui::Theme::Light));
+        ctx.fonts_mut(|fonts| {
             fonts
                 .layout_no_wrap(text(), font, egui::Color32::PLACEHOLDER)
                 .size()
@@ -98,9 +97,9 @@ mod tests {
         };
         // The window learns its content size on one frame and lays out with it on the next.
         for _ in 0..3 {
-            let _ = ctx.run(input(), draw);
+            let _ = test_run(ctx, input(), |_| draw(ctx));
         }
-        let output = ctx.run(input(), draw);
+        let output = test_run(ctx, input(), |_| draw(ctx));
 
         let mut found = None;
         fn collect(shape: &egui::Shape, found: &mut Option<Vec<Row>>) {
@@ -112,7 +111,7 @@ mod tests {
                         .iter()
                         .map(|row| Row {
                             text: row.glyphs.iter().map(|glyph| glyph.chr).collect(),
-                            width: row.rect.width(),
+                            width: row.rect().width(),
                         })
                         .collect();
                     *found = Some(rows);
@@ -136,7 +135,7 @@ mod tests {
         let ctx = egui::Context::default();
         fonts::install(&ctx);
         // egui only builds its faces on the first frame.
-        let _ = ctx.run(input(), |_| {});
+        let _ = test_run(&ctx, input(), |_| {});
         ctx
     }
 

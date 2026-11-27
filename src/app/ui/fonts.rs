@@ -5,6 +5,7 @@
 //! is handed to egui. If a platform cannot answer, egui's bundled fonts stay in use.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// What a font file says about one of its faces, used to pick the regular one.
 #[cfg(any(windows, target_os = "macos"))]
@@ -181,7 +182,7 @@ pub fn install(ctx: &egui::Context) {
     // sharp at any scale. A family of their own keeps them out of the text fallback chain.
     fonts.font_data.insert(
         ICON_FAMILY.to_owned(),
-        egui::FontData::from_static(egui_remixicon::FONT),
+        Arc::new(egui::FontData::from_static(egui_remixicon::FONT)),
     );
     fonts.families.insert(
         egui::FontFamily::Name(ICON_FAMILY.into()),
@@ -210,14 +211,22 @@ pub fn install(ctx: &egui::Context) {
             .insert("system-mono".to_owned(), font_data(mono));
     }
 
-    // The UI font first; the system's own Chinese fallback next. egui's emoji fonts stay
-    // last, for symbols no text font carries (the submenu arrow in its menus, for one).
+    // egui 0.37 ships its symbol faces only when the matching feature is enabled
+    // (`egui-icons` is always there; the two emoji faces need `monochrome_emoji_fonts`).
+    // Add whichever ones this build has, so a family list never names a missing font.
+    let fallbacks: Vec<String> = ["egui-icons", "NotoEmoji-Regular", "emoji-icon-font"]
+        .into_iter()
+        .filter(|name| fonts.font_data.contains_key(*name))
+        .map(str::to_owned)
+        .collect();
+
+    // The UI font first; the system's own Chinese fallback next. egui's symbol fonts stay
+    // last, for glyphs no text font carries.
     let mut proportional = vec!["system-ui".to_owned()];
     if cjk_fallback {
         proportional.push("system-cjk".to_owned());
     }
-    proportional.push("NotoEmoji-Regular".to_owned());
-    proportional.push("emoji-icon-font".to_owned());
+    proportional.extend(fallbacks.iter().cloned());
 
     let mut monospace = vec![if mono_font {
         "system-mono"
@@ -230,8 +239,7 @@ pub fn install(ctx: &egui::Context) {
     } else if ui_has_cjk && mono_font {
         monospace.push("system-ui".to_owned());
     }
-    monospace.push("NotoEmoji-Regular".to_owned());
-    monospace.push("emoji-icon-font".to_owned());
+    monospace.extend(fallbacks);
 
     fonts
         .families
@@ -264,11 +272,11 @@ pub fn report() -> Vec<String> {
 /// The font bytes are installed once and live until the process ends, so they are
 /// leaked on purpose: `FontData::from_owned` makes epaint clone the whole file (18.8 MB
 /// for the YaHei collection), while a borrowed slice is used in place.
-fn font_data(loaded: Loaded) -> egui::FontData {
+fn font_data(loaded: Loaded) -> Arc<egui::FontData> {
     let bytes: &'static [u8] = Box::leak(loaded.data.into_boxed_slice());
     let mut data = egui::FontData::from_static(bytes);
     data.index = loaded.index;
-    data
+    Arc::new(data)
 }
 
 fn describe(role: &str, loaded: &Loaded) -> String {
@@ -750,6 +758,8 @@ mod platform {
 mod tests {
     use super::*;
 
+    use crate::app::ui::test_run;
+
     #[cfg(windows)]
     #[test]
     fn windows_resolves_the_system_ui_font() {
@@ -771,12 +781,12 @@ mod tests {
         let ctx = egui::Context::default();
         install(&ctx);
         // The font atlas is built for the first frame, so ask for one before measuring.
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let _ = test_run(&ctx, egui::RawInput::default(), |_| {});
         // The actual console size: a Chinese letter must still take exactly two cells
         // after the type scale was raised, or every column after it drifts.
         let font = egui::FontId::monospace(super::super::typography::MONO);
         let width = |text: &str| {
-            ctx.fonts(|fonts| {
+            ctx.fonts_mut(|fonts| {
                 fonts
                     .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::BLACK)
                     .size()
@@ -828,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn font_data_borrows_its_bytes_once() {
+    fn font_data_keeps_its_bytes_and_face_index() {
         let loaded = Loaded {
             family: "Test".to_string(),
             path: PathBuf::from("test.ttf"),
@@ -838,8 +848,8 @@ mod tests {
             dual_width: false,
         };
         let data = font_data(loaded);
-        assert!(matches!(&data.font, std::borrow::Cow::Borrowed(_)));
-        assert_eq!(&*data.font, &[0, 1, 2, 3]);
+        let bytes: &[u8] = data.font.as_ref().as_ref();
+        assert_eq!(bytes, &[0, 1, 2, 3]);
         assert_eq!(data.index, 2);
     }
 

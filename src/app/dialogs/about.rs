@@ -20,6 +20,7 @@ pub(super) fn show(
     let mut action = None;
     egui::Window::new("About")
         .open(&mut open)
+        .drag_area(egui::WindowDrag::Anywhere)
         .collapsible(false)
         .resizable(false)
         .default_width(560.0)

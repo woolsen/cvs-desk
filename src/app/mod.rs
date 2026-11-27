@@ -259,6 +259,7 @@ impl App {
                 path: PathBuf::from(p),
                 frames: 0,
                 requested: false,
+                image: Default::default(),
             }),
         };
         app.reload();
@@ -441,18 +442,21 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
-        self.ui_frame(ctx, frame);
         self.shot_tick(ctx);
         if self.loading.is_some() || self.remote.is_some() || self.runner.running {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.ui_frame(ui, frame);
+    }
+
     /// Keep the folder on screen for the next start. A photograph is taken by a check,
     /// not by the user, so a `--screenshot` run must not decide what opens next time.
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         if self.shot.is_none() {
             self.sync_view_prefs();
             let _ = Prefs::remember_last_dir(&self.dir);

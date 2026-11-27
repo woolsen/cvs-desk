@@ -15,16 +15,17 @@ enum OutputMenuAction {
 }
 
 impl App {
-    pub(super) fn ui_output(&mut self, ctx: &egui::Context) {
+    pub(super) fn ui_output(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         if self.output == OutputKind::State && self.state_dirty && self.loading.is_none() {
             self.refresh_state_sheet();
         }
         let mut stop_clicked = false;
-        egui::TopBottomPanel::bottom("output")
+        egui::Panel::bottom("output")
             .resizable(true)
-            .default_height(200.0)
-            .min_height(80.0)
-            .show(ctx, |ui| {
+            .default_size(200.0)
+            .min_size(80.0)
+            .show(ui, |ui| {
                 let text = ui
                     .horizontal(|ui| {
                         for k in [
@@ -62,7 +63,7 @@ impl App {
                                     .output_selection
                                     .clone()
                                     .unwrap_or_else(|| text.clone());
-                                ui.output_mut(|o| o.copied_text = copy);
+                                ctx.copy_text(copy);
                             }
                             ui.label(
                                 egui::RichText::new(format!("{} line(s)", text.lines().count()))
@@ -132,21 +133,21 @@ impl App {
                                 .clicked()
                             {
                                 menu_action = Some(OutputMenuAction::Copy);
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui
                                 .add_enabled(has_text, egui::Button::new("Copy all"))
                                 .clicked()
                             {
                                 menu_action = Some(OutputMenuAction::CopyAll);
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui
                                 .add_enabled(has_text, egui::Button::new("Select all"))
                                 .clicked()
                             {
                                 menu_action = Some(OutputMenuAction::SelectAll);
-                                ui.close_menu();
+                                ui.close();
                             }
                             if is_console {
                                 ui.separator();
@@ -158,7 +159,7 @@ impl App {
                                     .clicked()
                                 {
                                     menu_action = Some(OutputMenuAction::ClearConsole);
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                         });
@@ -210,12 +211,12 @@ impl App {
                     Some(OutputMenuAction::SelectAll) => {
                         if let Some(id) = text_id {
                             let mut state =
-                                egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                                egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
                             state.cursor.set_char_range(Some(CCursorRange::two(
                                 CCursor::new(0),
                                 CCursor::new(body.chars().count()),
                             )));
-                            egui::TextEdit::store_state(ctx, id, state);
+                            egui::TextEdit::store_state(&ctx, id, state);
                             ctx.memory_mut(|m| m.request_focus(id));
                             self.output_selection = None;
                         }
@@ -290,6 +291,7 @@ fn remembered_selection(
 mod tests {
     use super::remembered_selection;
     use crate::app::tests::app_with_rows;
+    use crate::app::ui::test_run;
     use crate::app::App;
     use egui::text::CCursor;
 
@@ -308,10 +310,23 @@ mod tests {
     }
 
     fn run_pane(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> egui::FullOutput {
-        ctx.run(pane_input(events), |ctx| {
-            app.ui_output(ctx);
-            egui::CentralPanel::default().show(ctx, |_| {});
+        test_run(ctx, pane_input(events), |ui| {
+            app.ui_output(ui);
+            egui::CentralPanel::default().show(ui, |_| {});
         })
+    }
+
+    /// The text the frame put on the clipboard, if any.
+    fn copied_text(frame: &egui::FullOutput) -> Option<&str> {
+        frame
+            .platform_output
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            })
     }
 
     fn secondary(pos: egui::Pos2, pressed: bool) -> egui::Event {
@@ -509,10 +524,7 @@ mod tests {
         let menu = open_menu(&ctx, &mut app, "first line\nsecond line");
         let clicked = click_menu_row(&ctx, &mut app, &menu, "Copy all");
 
-        assert_eq!(
-            clicked.platform_output.copied_text,
-            "first line\nsecond line"
-        );
+        assert_eq!(copied_text(&clicked), Some("first line\nsecond line"));
     }
 
     #[test]
@@ -530,7 +542,7 @@ mod tests {
 
         let menu = open_menu(&ctx, &mut app, all);
         let clicked = click_menu_row(&ctx, &mut app, &menu, "Copy");
-        assert_eq!(clicked.platform_output.copied_text, all);
+        assert_eq!(copied_text(&clicked), Some(all));
     }
 
     #[test]
@@ -543,7 +555,7 @@ mod tests {
 
         let first = run_pane(&ctx, &mut app, Vec::new());
         let (origin, galley) = text_shape(&first, all).expect("the console text is on screen");
-        let at = origin + galley.pos_from_ccursor(CCursor::new(0)).center().to_vec2();
+        let at = origin + galley.pos_from_cursor(CCursor::new(0)).center().to_vec2();
 
         run_pane(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
         for _ in 0..2 {
@@ -563,7 +575,7 @@ mod tests {
 
         let menu = open_menu(&ctx, &mut app, all);
         let clicked = click_menu_row(&ctx, &mut app, &menu, "Copy");
-        assert_eq!(clicked.platform_output.copied_text, "first");
+        assert_eq!(copied_text(&clicked), Some("first"));
     }
 
     #[test]
@@ -599,7 +611,7 @@ mod tests {
 
         let first = run_pane(&ctx, &mut app, Vec::new());
         let (origin, galley) = text_shape(&first, all).expect("the console text is on screen");
-        let at = origin + galley.pos_from_ccursor(CCursor::new(0)).center().to_vec2();
+        let at = origin + galley.pos_from_cursor(CCursor::new(0)).center().to_vec2();
 
         run_pane(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
         for _ in 0..2 {

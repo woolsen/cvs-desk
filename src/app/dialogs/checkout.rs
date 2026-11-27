@@ -21,6 +21,7 @@ pub(super) fn show(
     let mut action = None;
     egui::Window::new("Checkout")
         .open(&mut open)
+        .drag_area(egui::WindowDrag::Anywhere)
         .collapsible(false)
         .resizable(false)
         .default_width(520.0)

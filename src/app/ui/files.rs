@@ -121,7 +121,7 @@ struct Heading {
 
 /// The address bar's stable id, so clicking the path can hand it the keyboard.
 fn address_id() -> egui::Id {
-    egui::Id::new("folder-address")
+    egui::Id::unique("folder-address")
 }
 
 /// The padding inside the address and search fields. The painted path is measured
@@ -133,12 +133,11 @@ const FIELD_MARGIN: egui::Vec2 = egui::vec2(6.0, 4.0);
 /// cannot change the bar's height and move the list below it.
 fn field_height(ui: &egui::Ui) -> f32 {
     let font = egui::FontSelection::Default.resolve(ui.style());
-    let row = ui.fonts(|fonts| {
-        fonts
-            .layout_no_wrap("0".to_owned(), font, egui::Color32::WHITE)
-            .size()
-            .y
-    });
+    let row = ui
+        .painter()
+        .layout_no_wrap("0".to_owned(), font, egui::Color32::WHITE)
+        .size()
+        .y;
     row + 2.0 * FIELD_MARGIN.y
 }
 
@@ -222,15 +221,16 @@ impl App {
                     egui::Sense::click(),
                 );
                 let visuals = *ui.style().interact(&response);
-                // The same frame egui paints around a text field: fill, rounding and
-                // the hover expansion. Hovering already grows it like the field, so a
-                // click only changes the stroke's color, never the frame's size.
+                // The same frame egui paints around a text field: fill, rounding and the
+                // widget's own expansion. A click changes the stroke's color, not the
+                // frame's size, exactly as it does for the field.
                 let frame = rect.expand(visuals.expansion);
                 ui.painter().rect(
                     frame,
-                    visuals.rounding,
+                    visuals.corner_radius,
                     ui.visuals().extreme_bg_color,
                     visuals.bg_stroke,
+                    egui::StrokeKind::Inside,
                 );
                 let font = egui::TextStyle::Body.resolve(ui.style());
                 // A text field keeps its text color on hover, so the path does too.
@@ -323,7 +323,7 @@ impl App {
             egui::TextEdit::singleline(&mut self.search)
                 .id(id)
                 .hint_text("Search this folder")
-                .horizontal_align(egui::Align::LEFT)
+                .align(egui::Align2::LEFT_CENTER)
                 .margin(FIELD_MARGIN),
         );
         if response.changed() {
@@ -415,7 +415,7 @@ impl App {
             } else {
                 egui::Sense::hover()
             };
-            let response = ui.interact(cell, ui.id().with(("list-heading", h.label)), sense);
+            let response = ui.interact(cell, ui.scope_id().with(("list-heading", h.label)), sense);
             match h.key {
                 Some(key) => {
                     let sorted = self.sort == key;
@@ -441,7 +441,7 @@ impl App {
                         response
                     };
                     response.widget_info(|| {
-                        egui::WidgetInfo::selected(egui::WidgetType::Button, true, sorted, h.label)
+                        egui::WidgetInfo::selected(egui::Role::Button, true, sorted, h.label)
                     });
                     if released && exact_hover {
                         clicked = Some(key);
@@ -449,7 +449,7 @@ impl App {
                 }
                 None => {
                     response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, h.label)
+                        egui::WidgetInfo::labeled(egui::Role::Label, true, h.label)
                     });
                     if exact_hover {
                         response.on_hover_text(
@@ -567,7 +567,7 @@ impl App {
                         let mut pick = |ui: &mut egui::Ui, label: &str, action: FileMenuAction| {
                             if ui.button(label).clicked() {
                                 menu_action = Some((action, idx));
-                                ui.close_menu();
+                                ui.close();
                             }
                         };
                         pick(ui, "Open", FileMenuAction::Open);
@@ -849,12 +849,10 @@ fn click_selection(
 fn address_label(ui: &egui::Ui, path: &Path, max_width: f32, font: &egui::FontId) -> String {
     let full = path.display().to_string();
     let width_of = |text: &str| {
-        ui.fonts(|fonts| {
-            fonts
-                .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
-                .size()
-                .x
-        })
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+            .size()
+            .x
     };
     if width_of(&full) <= max_width {
         return full;
@@ -908,6 +906,7 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::app::tests::{app_with_rows, row};
+    use crate::app::ui::test_run;
     use cvsdesk::entries::Row;
 
     #[test]
@@ -976,8 +975,8 @@ mod tests {
     fn a_long_path_shows_the_current_folder_at_the_end() {
         let ctx = egui::Context::default();
         let mut shown = String::new();
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = test_run(&ctx, Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let font = egui::TextStyle::Body.resolve(ui.style());
                 shown = address_label(
                     ui,
@@ -1010,19 +1009,19 @@ mod tests {
         fonts::install(&ctx);
 
         app.open_search();
-        let _ = ctx.run(input(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.ui_file_list(ui));
+        let _ = test_run(&ctx, input(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| app.ui_file_list(ui));
         });
 
         let mut typing = input();
         typing.events.push(egui::Event::Text("alpha".into()));
-        let _ = ctx.run(typing, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.ui_file_list(ui));
+        let _ = test_run(&ctx, typing, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| app.ui_file_list(ui));
         });
         assert_eq!(app.search, "alpha", "typing reaches the search box");
 
-        let _ = ctx.run(input(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.ui_file_list(ui));
+        let _ = test_run(&ctx, input(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| app.ui_file_list(ui));
         });
         assert_eq!(
             app.order,
@@ -1062,11 +1061,24 @@ mod tests {
             egui::vec2(1000.0, 800.0),
         ));
         input.events = events;
-        ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        test_run(ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 app.ui_file_list(ui);
             });
         })
+    }
+
+    /// The text the frame put on the clipboard, if any.
+    fn copied_text(frame: &egui::FullOutput) -> Option<&str> {
+        frame
+            .platform_output
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            })
     }
 
     fn primary(pos: egui::Pos2, pressed: bool) -> egui::Event {
@@ -1361,7 +1373,7 @@ mod tests {
         let menu = open_row_menu(&ctx, &mut app, "beta.txt");
         let clicked = click_menu_row(&ctx, &mut app, &menu, "Copy name");
 
-        assert_eq!(clicked.platform_output.copied_text, "alpha.txt\nbeta.txt");
+        assert_eq!(copied_text(&clicked), Some("alpha.txt\nbeta.txt"));
     }
 
     #[test]
@@ -1374,8 +1386,8 @@ mod tests {
         let clicked = click_menu_row(&ctx, &mut app, &menu, "Copy full path");
 
         assert_eq!(
-            clicked.platform_output.copied_text,
-            "C:\\work\\alpha.txt\nC:\\work\\beta.txt"
+            copied_text(&clicked),
+            Some("C:\\work\\alpha.txt\nC:\\work\\beta.txt")
         );
     }
 
@@ -1528,8 +1540,8 @@ mod tests {
         let hover_frame = address_frame(&hovered);
         assert_size_close(
             hover_frame.size(),
-            idle_frame.size() + egui::vec2(2.0, 2.0),
-            "hover must grow the frame the way a text field does",
+            idle_frame.size(),
+            "hover must keep the frame's size the way a text field does",
         );
 
         run_list(
@@ -1648,8 +1660,8 @@ mod tests {
             egui::Pos2::ZERO,
             egui::vec2(1000.0, 800.0),
         ));
-        let output = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = test_run(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 app.ui_file_list(ui);
             });
         });
