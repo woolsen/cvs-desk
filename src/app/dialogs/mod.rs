@@ -2,7 +2,7 @@
 
 use cvsdesk::prefs::Prefs;
 
-use crate::app::{App, OutputKind};
+use crate::app::App;
 
 mod about;
 mod checkout;
@@ -71,7 +71,6 @@ pub(super) enum DialogAction {
     Diff,
     SavePrefs,
     RunLine,
-    ShowSheet,
     HistoryRefresh,
 }
 
@@ -79,10 +78,7 @@ impl App {
     pub(super) fn ui_dialogs(&mut self, ctx: &egui::Context) {
         let sel_names = self.selected_local_names();
         let cvsroot = self.root.clone();
-        let repository = self.repository.clone();
         let recent_roots = self.prefs.recent_roots.clone();
-        let kind_label = self.folder_kind().unwrap_or("").to_string();
-        let dir = self.dir.display().to_string();
         let history_globals = self.prefs.globals();
         // A check photographs the main window without taking focus, so dialogs opened by
         // one must not raise themselves over whatever the user is doing.
@@ -140,7 +136,7 @@ impl App {
                 Dialog::History(state) => {
                     history::show(ctx, state, &history_globals, raise_windows)
                 }
-                Dialog::About => about::show(ctx, &cvsroot, &kind_label, &repository, &dir),
+                Dialog::About => about::show(ctx),
             }
         };
         if let Some(a) = action {
@@ -165,12 +161,6 @@ impl App {
             }
             DialogAction::TagsRetry => {
                 self.request_tags();
-                return;
-            }
-            DialogAction::ShowSheet => {
-                self.refresh_state_sheet();
-                self.output = OutputKind::State;
-                self.dialog = None;
                 return;
             }
             DialogAction::HistoryRefresh => {
@@ -203,7 +193,6 @@ impl App {
             DialogAction::SavePrefs => preferences::apply(self, d),
             DialogAction::RunLine => command_line::apply(self, d),
             DialogAction::Close
-            | DialogAction::ShowSheet
             | DialogAction::TagsCreate
             | DialogAction::TagsDelete
             | DialogAction::TagsRetry

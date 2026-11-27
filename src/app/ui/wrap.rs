@@ -2,16 +2,10 @@
 //!
 //! egui breaks a row at a Chinese letter as soon as it is the last "word boundary" that
 //! fits, so a Windows path that runs through a Chinese folder name ends its row right
-//! after that name and leaves the rest of the row empty. [`label`] breaks at the last
+//! after that name and leaves the rest of the row empty. [`label_in`] breaks at the last
 //! separator that fits instead, through [`cvsdesk::util::wrap_path`].
 
 use cvsdesk::util::wrap_path;
-
-/// Draw `text` as body text, filling each row to the width the label has.
-pub(crate) fn label(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    label_in(ui, text, font, false)
-}
 
 /// Draw `text` at `font`, dimmed when `weak`, filling each row to the width the label has.
 pub(crate) fn label_in(
@@ -85,14 +79,15 @@ mod tests {
         rows.iter().map(|row| row.text.as_str()).collect()
     }
 
-    /// Draw the label in an About-sized window; answer each row egui actually drew.
+    /// Draw the label in a fixed-width window; answer each row egui actually drew.
     fn drawn(ctx: &egui::Context, window_width: f32) -> Vec<Row> {
         let draw = |ctx: &egui::Context| {
-            egui::Window::new("About")
+            egui::Window::new("Wrap")
                 .resizable(false)
                 .default_width(window_width)
                 .show(ctx, |ui| {
-                    label(ui, &text());
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    label_in(ui, &text(), font, false);
                 });
         };
         // The window learns its content size on one frame and lays out with it on the next.

@@ -7,7 +7,7 @@ use std::sync::mpsc::{channel, TryRecvError};
 use cvsdesk::cvs::{Cmd, CommandRequest, Msg};
 use cvsdesk::cvs_client::work::codec;
 use cvsdesk::cvs_client::work::entries::Entries;
-use cvsdesk::entries::{self, State};
+use cvsdesk::entries::State;
 use cvsdesk::history::History;
 
 use crate::app::dialogs::history::HistoryState;
@@ -64,16 +64,6 @@ impl App {
     /// own `CVS/Root`. An empty string means cvs runs without `-d`.
     pub(super) fn root_for(&self, req: &CommandRequest) -> String {
         req.root.clone().unwrap_or_else(|| self.root.clone())
-    }
-
-    /// The connection kind named by the folder's own root, for the About window.
-    /// `None` means the folder is not a working copy.
-    pub(super) fn folder_kind(&self) -> Option<&'static str> {
-        if self.root.trim().is_empty() {
-            None
-        } else {
-            Some(entries::parse_cvsroot(&self.root).0.label())
-        }
     }
 
     /// The root Checkout, Import and Login open with: the working copy's root when there

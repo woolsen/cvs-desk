@@ -148,16 +148,6 @@ fn the_dialog_connection_prefers_the_working_copy_root() {
 }
 
 #[test]
-fn the_folder_kind_comes_from_the_folders_own_root() {
-    let mut app = app_with_rows(Vec::new());
-    app.prefs.kind = cvsdesk::entries::ConnKind::Pserver;
-    app.root = ":kserver:ann@host:/repo".to_string();
-    assert_eq!(app.folder_kind(), Some("kserver"));
-    app.root.clear();
-    assert_eq!(app.folder_kind(), None);
-}
-
-#[test]
 fn reading_another_folder_forgets_the_old_root() {
     let mut app = app_with_rows(Vec::new());
     app.root = ":pserver:work@host:/repo".to_string();
