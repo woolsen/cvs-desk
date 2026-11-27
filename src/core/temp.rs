@@ -92,7 +92,42 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        remove_tree(&self.dir);
+    }
+}
+
+/// Remove a folder even when a checkout wrote read-only files. Windows refuses to
+/// delete a read-only file, and a failed cleanup would leave the whole session behind.
+fn remove_tree(path: &Path) -> bool {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let mut ok = true;
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            ok &= remove_tree(&child);
+        } else {
+            clear_readonly(&child);
+            if std::fs::remove_file(&child).is_err() {
+                ok = false;
+            }
+        }
+    }
+    clear_readonly(path);
+    std::fs::remove_dir(path).is_ok() && ok
+}
+
+fn clear_readonly(path: &Path) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        let _ = std::fs::set_permissions(path, permissions);
     }
 }
 
@@ -123,7 +158,7 @@ pub fn cleanup_stale_at(root: &Path, max_age: Duration, now: SystemTime) -> io::
             })
             .unwrap_or(now);
         let age = now.duration_since(created).unwrap_or_default();
-        if age >= max_age && std::fs::remove_dir_all(&path).is_ok() {
+        if age >= max_age && remove_tree(&path) {
             removed += 1;
         }
     }
