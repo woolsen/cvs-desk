@@ -23,6 +23,20 @@ the full license texts for CVS Desk and its dependencies.
 The build is not code-signed yet, so Windows SmartScreen may warn about it. Each release
 includes `SHA256SUMS.txt` for checking the download.
 
+## Graphics
+
+The window draws through OpenGL, and takes Vulkan where a machine has no usable OpenGL. That
+keeps the program small: on an Intel integrated GPU the same window needs about 89 MB of
+private memory this way, against 355 MB when it is drawn through DX12.
+
+Some remote desktop sessions and virtual machines offer neither OpenGL nor Vulkan. On those,
+name the backend before starting the program:
+
+```text
+set WGPU_BACKEND=dx12
+cvsdesk.exe
+```
+
 ## Features
 
 - Folder tree and file list with per-file state: modified, added, missing, unmodified, and more.

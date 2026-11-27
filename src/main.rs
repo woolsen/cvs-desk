@@ -30,11 +30,23 @@ fn window_icon() -> Option<egui::IconData> {
 /// default keeps two frames in flight for throughput, which costs a whole display
 /// refresh of input latency: the hover band and a window drag trail the cursor. One
 /// frame in flight is the low-latency choice for a GUI like this one.
+///
+/// The adapters offered are OpenGL and Vulkan, chosen by [`prefer_opengl`]: on an Intel
+/// integrated GPU the DX12 backend alone keeps about 60 MB more committed than both of
+/// them together, before it is even asked to draw anything. `WGPU_BACKEND` still
+/// overrides the list, so a machine that has to draw through DX12 can say
+/// `WGPU_BACKEND=dx12`.
 fn native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
+    let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = eframe::wgpu::Backends::from_env()
+        .unwrap_or(eframe::wgpu::Backends::GL | eframe::wgpu::Backends::VULKAN);
+    setup.native_adapter_selector = Some(std::sync::Arc::new(prefer_opengl));
+
     eframe::NativeOptions {
         viewport,
         wgpu_options: eframe::WgpuConfiguration {
             surface: eframe::SurfaceConfig::LOW_LATENCY,
+            wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(setup),
             ..Default::default()
         },
         // The program installs the system fonts itself (`app::ui::fonts`); letting egui
@@ -42,6 +54,37 @@ fn native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
         system_font_fallback: false,
         ..Default::default()
     }
+}
+
+/// Prefers an OpenGL adapter, and otherwise takes the first one that can draw the window.
+///
+/// A window this small has no need for DX12, and on Windows the driver charges a lot for
+/// it: measured on an Intel integrated GPU, the same build held 355 MB of private memory
+/// with the DX12 backend, 147 MB when DX12 was merely offered as an option, and 73 MB
+/// with OpenGL alone. Nothing here uses a DX12 feature, so the cheaper adapter wins.
+///
+/// It is only a preference. Every backend that was asked for stays in the list, so a
+/// machine whose OpenGL is too old - or which offers none at all - still opens its window
+/// on Vulkan.
+fn prefer_opengl(
+    adapters: &[eframe::wgpu::Adapter],
+    surface: Option<&eframe::wgpu::Surface<'_>>,
+) -> Result<eframe::wgpu::Adapter, String> {
+    let fits = |adapter: &&eframe::wgpu::Adapter| {
+        surface.map_or(true, |surface| adapter.is_surface_supported(surface))
+    };
+    let usable: Vec<&eframe::wgpu::Adapter> = adapters.iter().filter(fits).collect();
+    let pick = usable
+        .iter()
+        .find(|adapter| adapter.get_info().backend == eframe::wgpu::Backend::Gl)
+        .or_else(|| {
+            usable
+                .iter()
+                .find(|adapter| adapter.get_info().device_type != eframe::wgpu::DeviceType::Cpu)
+        })
+        .or_else(|| usable.first());
+    pick.map(|adapter| (*adapter).clone())
+        .ok_or_else(|| "no adapter can draw this window".to_owned())
 }
 
 fn main() -> eframe::Result<()> {
