@@ -11,7 +11,6 @@
 //! line. The view can therefore show "no newline at end of file" without guessing.
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
 use similar::{Algorithm, DiffTag, TextDiff};
 
@@ -96,7 +95,6 @@ pub struct DiffOptions {
     /// hunks for the previous/next buttons. The rows themselves are always kept in
     /// full: this only groups jumps, it never hides a line.
     pub context: usize,
-    pub timeout_ms: u64,
 }
 
 impl Default for DiffOptions {
@@ -104,7 +102,6 @@ impl Default for DiffOptions {
         Self {
             algorithm: Algorithm::Patience,
             context: 3,
-            timeout_ms: 5_000,
         }
     }
 }
@@ -236,9 +233,10 @@ impl DiffModel {
             notices.push(Notice::LineEndingsDiffer);
         }
 
+        // No deadline: the worker thread, not the window, runs this comparison. A
+        // timeout here would silently turn a hard file into an approximate diff.
         let diff = TextDiff::configure()
             .algorithm(options.algorithm)
-            .timeout(Duration::from_millis(options.timeout_ms))
             .diff_lines(&left.text, &right.text);
 
         let mut rows = Vec::new();

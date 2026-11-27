@@ -14,7 +14,7 @@ use std::sync::mpsc::{channel, Receiver};
 use cvsdesk::cvs::CommandRequest;
 use cvsdesk::cvs_client::engine::{self, CancelToken, Request, Sink};
 use cvsdesk::cvs_client::work::{codec, dir};
-use cvsdesk::sidediff::{count_line_endings, FileMeta, FileText};
+use cvsdesk::sidediff::{count_line_endings, DiffModel, DiffOptions, FileMeta, FileText};
 use cvsdesk::temp::Session;
 
 /// Which two versions the window asked for.
@@ -44,9 +44,10 @@ pub(super) struct LoadedPair {
     pub(super) right: FileText,
 }
 
-/// One message from the worker.
+/// One message from the worker. The comparison is built there, not on the window's
+/// thread: a large pair must not freeze the frame while `similar` works.
 pub(super) enum Msg {
-    Ready(Box<LoadedPair>),
+    Ready(Box<DiffModel>),
     Failed(String),
 }
 
@@ -76,7 +77,12 @@ impl Loader {
         std::thread::spawn(move || {
             let result = load_pair(&dir, &root, &globals, &file, &left, &right, &worker_cancel);
             let msg = match result {
-                Ok(pair) => Msg::Ready(Box::new(pair)),
+                Ok(pair) if !worker_cancel.is_cancelled() => Msg::Ready(Box::new(DiffModel::build(
+                    pair.left,
+                    pair.right,
+                    DiffOptions::default(),
+                ))),
+                Ok(_) => Msg::Failed("the diff preview stopped".to_string()),
                 Err(_) if worker_cancel.is_cancelled() => {
                     Msg::Failed("the diff preview stopped".to_string())
                 }

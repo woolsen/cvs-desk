@@ -449,9 +449,8 @@ impl HistoryState {
         }
 
         match message {
-            Msg::Ready(pair) => {
-                let model = DiffModel::build(pair.left, pair.right, DiffOptions::default());
-                self.diff_model = Some(model);
+            Msg::Ready(model) => {
+                self.diff_model = Some(*model);
                 self.diff_generation = self.diff_generation.wrapping_add(1);
                 self.diff_error.clear();
                 self.diff_loading = false;
