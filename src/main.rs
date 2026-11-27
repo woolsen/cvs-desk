@@ -24,6 +24,26 @@ fn window_icon() -> Option<egui::IconData> {
     })
 }
 
+/// The eframe options the window runs with.
+///
+/// Every pointer move repaints this window, and it does almost no GPU work. wgpu's
+/// default keeps two frames in flight for throughput, which costs a whole display
+/// refresh of input latency: the hover band and a window drag trail the cursor. One
+/// frame in flight is the low-latency choice for a GUI like this one.
+fn native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport,
+        wgpu_options: eframe::WgpuConfiguration {
+            surface: eframe::SurfaceConfig::LOW_LATENCY,
+            ..Default::default()
+        },
+        // The program installs the system fonts itself (`app::ui::fonts`); letting egui
+        // add its own on-demand fallback would change that chain behind the tests' back.
+        system_font_fallback: false,
+        ..Default::default()
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let mut shot: Option<String> = None;
     let mut start: Option<PathBuf> = None;
@@ -94,13 +114,7 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    let options = eframe::NativeOptions {
-        viewport,
-        // The program installs the system fonts itself (`app::ui::fonts`); letting egui
-        // add its own on-demand fallback would change that chain behind the tests' back.
-        system_font_fallback: false,
-        ..Default::default()
-    };
+    let options = native_options(viewport);
 
     let shot_for_app = shot.clone();
     let start_for_app = start.clone();
@@ -119,4 +133,19 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_keeps_one_frame_in_flight() {
+        let options = native_options(egui::ViewportBuilder::default());
+        assert_eq!(
+            options.wgpu_options.surface.desired_maximum_frame_latency,
+            Some(1),
+            "a pointer-driven window must not queue a second frame"
+        );
+    }
 }
