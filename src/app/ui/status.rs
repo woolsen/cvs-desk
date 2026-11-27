@@ -1,6 +1,6 @@
 //! The status bar: the last command, the counts and the last trouble.
 
-use crate::app::{App, Trouble};
+use crate::app::{App, RemoteState, Trouble};
 
 use super::state_color;
 
@@ -10,6 +10,7 @@ impl App {
         // order current itself; otherwise the first frame after a read shows the old
         // count.
         self.ensure_order();
+        let mut stop_remote = false;
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.loading.is_some() {
@@ -30,6 +31,14 @@ impl App {
                             .weak(),
                     )
                     .on_hover_text("Repository names are read with rlog -R for this folder only.");
+                    if self.remote_state == RemoteState::Loading
+                        && ui
+                            .small_button("Stop")
+                            .on_hover_text("Stop reading the server folder list")
+                            .clicked()
+                    {
+                        stop_remote = true;
+                    }
                     ui.separator();
                     let counts = &self.counts;
                     if counts.is_empty() {
@@ -78,5 +87,8 @@ impl App {
                 });
             });
         });
+        if stop_remote {
+            self.stop_remote_listing();
+        }
     }
 }

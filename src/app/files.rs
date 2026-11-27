@@ -523,8 +523,12 @@ impl App {
         let (_, remote) = self.scope_counts();
         match self.remote_state {
             RemoteState::Off => "Not checked out: unavailable".to_string(),
+            RemoteState::Loading if self.remote_found > 0 => {
+                format!("Checking server… {} found", self.remote_found)
+            }
             RemoteState::Loading => "Checking server…".to_string(),
             RemoteState::Ready => format!("{remote} not checked out"),
+            RemoteState::Stopped => format!("{remote} not checked out (partial)"),
             RemoteState::Failed => "Server list unavailable".to_string(),
         }
     }

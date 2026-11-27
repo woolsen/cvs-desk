@@ -679,8 +679,12 @@ impl App {
         let (_, remote) = self.scope_counts();
         let remote_label = match self.remote_state {
             RemoteState::Off => "Not checked out (—)".to_string(),
+            RemoteState::Loading if self.remote_found > 0 => {
+                format!("Not checked out (checking… {})", self.remote_found)
+            }
             RemoteState::Loading => "Not checked out (checking…)".to_string(),
             RemoteState::Ready => format!("Not checked out ({remote})"),
+            RemoteState::Stopped => format!("Not checked out ({remote} partial)"),
             RemoteState::Failed => "Not checked out (unavailable)".to_string(),
         };
         let mut chosen = None;
@@ -810,11 +814,25 @@ impl App {
         let row_h = typography::LIST_ROW_H + row_gap;
         // Only vertical: every cell truncates to its column, so horizontal scrolling
         // could never line the rows up with a heading band that stays put.
-        ui.scope(|ui| {
+        let mut restore = None;
+        if let Some((name, within)) = self.pending_scroll.take() {
+            if let Some(pos) = self
+                .order
+                .iter()
+                .position(|&index| self.rows[index].name == name)
+            {
+                restore = Some(pos as f32 * row_h + within);
+            }
+        }
+        let mut area = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .id_salt("file-list");
+        if let Some(offset) = restore {
+            area = area.vertical_scroll_offset(offset);
+        }
+        let list = ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_rows(ui, row_h, self.order.len(), |ui, range| {
+            area.show_rows(ui, row_h, self.order.len(), |ui, range| {
                     ui.set_min_width(ui.available_width());
                     // Every column is painted from the same body font, and a Chinese letter
                     // takes two of its cells; asking the font keeps truncation in step with
@@ -968,8 +986,20 @@ impl App {
                         };
                         ui.label(egui::RichText::new(message).italics().weak());
                     }
-                });
+                })
         });
+        let out = list.inner;
+        let offset = out.state.clamped_offset().y;
+        let index = (offset / row_h).floor() as usize;
+        if let Some(&row_index) = self.order.get(index) {
+            self.list_anchor = Some((
+                self.rows[row_index].name.clone(),
+                offset - index as f32 * row_h,
+            ));
+        } else {
+            self.list_anchor = None;
+        }
+        self.list_interacting = ui.input(|i| i.pointer.any_down() || i.is_scrolling());
 
         // A right click selects the row under the pointer unless it is already part of
         // the selection, so a command can act on the whole selection it was opened on.

@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::time::Instant;
 
 use cvsdesk::cvs::{Msg, Runner};
 use cvsdesk::demo;
@@ -48,6 +49,7 @@ pub(super) enum RemoteState {
     Off,
     Loading,
     Ready,
+    Stopped,
     Failed,
 }
 
@@ -171,6 +173,26 @@ pub(crate) struct App {
     remote_enabled: bool,
     remote_seq: u64,
     remote_lines: Vec<String>,
+    /// Reads the running listing's lines as they arrive, so names can appear before
+    /// `rlog -R` has walked the whole folder.
+    remote_parser: Option<cvsdesk::remote::Parser>,
+    /// Names the parser found that the list has not taken yet.
+    remote_pending: Vec<cvsdesk::remote::Found>,
+    /// When the pending names were last merged, so a fast server cannot rebuild the
+    /// list on every line.
+    remote_last_merge: Instant,
+    /// Direct repository names found so far, for the progress label.
+    remote_found: usize,
+    /// The last complete listing for each folder, kept for this run of the window.
+    remote_cache: remote::Cache,
+    /// The row at the top of the list and the pixels of it above the viewport. A batch
+    /// of names restores this row instead of moving what the reader is looking at.
+    list_anchor: Option<(String, f32)>,
+    /// Set when the next frame must restore `list_anchor`.
+    pending_scroll: Option<(String, f32)>,
+    /// True while the pointer is down or the wheel is moving. Name merges wait for a
+    /// quiet frame, so the list never changes under an active pointer.
+    list_interacting: bool,
     /// True when the read in flight was started to show a command's changes in place:
     /// the rows on screen stay until the new ones arrive, and the selection follows its
     /// names instead of being cleared.
@@ -272,6 +294,14 @@ impl App {
             remote_enabled: true,
             remote_seq: 0,
             remote_lines: Vec::new(),
+            remote_parser: None,
+            remote_pending: Vec::new(),
+            remote_last_merge: Instant::now(),
+            remote_found: 0,
+            remote_cache: remote::Cache::default(),
+            list_anchor: None,
+            pending_scroll: None,
+            list_interacting: false,
             refresh_in_place: false,
             refresh_after_command: false,
             checkout_waiting: None,

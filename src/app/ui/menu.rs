@@ -87,6 +87,14 @@ impl App {
                         self.output = OutputKind::Console;
                         ui.close();
                     }
+                    if ui
+                        .add_enabled(in_project, egui::Button::new("Refresh server list"))
+                        .on_hover_text("Read the repository names again with rlog -R")
+                        .clicked()
+                    {
+                        self.refresh_remote_listing();
+                        ui.close();
+                    }
                     if ui.button("File states…").clicked() {
                         self.refresh_state_sheet();
                         self.output = OutputKind::State;
