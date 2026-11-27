@@ -33,13 +33,13 @@ encoding_rs = "0.8"
 # Finds the face index inside a .ttc and tells whether a face covers a character.
 ttf-parser = "0.25"
 # How many character cells text takes: a Chinese letter is two cells, a Latin one is one.
-unicode-width = "0.1"
+unicode-width = "0.2"
 # `cvs -z`: the client/server protocol's gzip stream (Gzip-stream), and the tests that play
 # the other end of it.
 flate2 = "1"
 # The settings file is TOML: the standard crate keeps hand edits and the program's own
 # escaping and lists in agreement.
-toml = "0.8"
+toml = "1.2"
 
 [target.'cfg(windows)'.dependencies]
 # Reads the message font and FontLink; safe bindings only.
