@@ -5,6 +5,7 @@ use cvsdesk::entries::State;
 
 use crate::app::App;
 
+pub(super) mod diff_view;
 mod files;
 mod menu;
 mod output;

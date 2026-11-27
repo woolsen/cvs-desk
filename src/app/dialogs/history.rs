@@ -11,11 +11,13 @@ use std::time::{Duration, Instant};
 use cvsdesk::entries::State;
 use cvsdesk::graph;
 use cvsdesk::history::History;
+use cvsdesk::sidediff::{DiffModel, DiffOptions, FileText};
 use cvsdesk::truncate_columns;
 
 use super::DialogAction;
-use crate::app::history_preview::{self, Loader, Msg, Target};
+use crate::app::ui::diff_view::DiffView;
 use crate::app::ui::typography::small_monospace;
+use crate::app::version_loader::{Loader, Msg, Side, Target};
 
 const SELECTED_BG: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xF0, 0xFE);
 const HOVER_BG: egui::Color32 = egui::Color32::from_rgb(0xF5, 0xF8, 0xFC);
@@ -66,8 +68,9 @@ pub(crate) struct HistoryState {
     branch_filter: BranchFilter,
     diff_target: Target,
     diff_open: bool,
-    diff_lines: Vec<String>,
-    diff_incoming: Vec<String>,
+    diff_model: Option<DiffModel>,
+    diff_view: DiffView,
+    diff_generation: u64,
     diff_error: String,
     diff_loading: bool,
     diff_revision: String,
@@ -166,8 +169,9 @@ impl HistoryState {
             branch_filter: BranchFilter::All,
             diff_target: Target::Previous,
             diff_open: false,
-            diff_lines: Vec::new(),
-            diff_incoming: Vec::new(),
+            diff_model: None,
+            diff_view: DiffView::new(),
+            diff_generation: 0,
             diff_error: String::new(),
             diff_loading: false,
             diff_revision: String::new(),
@@ -195,17 +199,20 @@ impl HistoryState {
         state.loader = None;
         state.diff_loading = false;
         state.diff_revision = "1.5".to_string();
-        state.diff_lines = vec![
-            "--- main.c\t2026/11/21 16:20:02".to_string(),
-            "+++ main.c\t2026/11/22 10:04:11".to_string(),
-            "@@ -1,5 +1,5 @@".to_string(),
-            " /* sample */".to_string(),
-            " #include <stdio.h>".to_string(),
-            " ".to_string(),
-            "-int main(void) { return 0; }".to_string(),
-            "+int main(void) { return 1; }".to_string(),
-            " ".to_string(),
-        ];
+        state.diff_model = Some(DiffModel::build(
+            FileText::from_text(
+                "main.c @ 1.4",
+                "/* sample */\n#include <stdio.h>\n\nint main(void) { return 0; }\n",
+                "c",
+            ),
+            FileText::from_text(
+                "main.c @ 1.5",
+                "/* sample */\n#include <stdio.h>\n\nint main(void) { return 1; }\n",
+                "c",
+            ),
+            DiffOptions::default(),
+        ));
+        state.diff_generation = 1;
         state
     }
 
@@ -240,7 +247,7 @@ impl HistoryState {
             self.loader = None;
             self.pending = None;
             self.diff_loading = false;
-            self.diff_lines.clear();
+            self.diff_model = None;
             self.diff_revision.clear();
         }
     }
@@ -275,8 +282,7 @@ impl HistoryState {
         self.error.clear();
         self.tags_expanded = false;
         self.loader = None;
-        self.diff_incoming.clear();
-        self.diff_lines.clear();
+        self.diff_model = None;
         self.diff_error.clear();
         self.diff_revision.clear();
         self.selected = previous_revision
@@ -310,8 +316,7 @@ impl HistoryState {
         self.selected = Some(index);
         self.tags_expanded = false;
         self.loader = None;
-        self.diff_incoming.clear();
-        self.diff_lines.clear();
+        self.diff_model = None;
         self.diff_error.clear();
         self.diff_revision.clear();
         self.queue_preview();
@@ -324,8 +329,7 @@ impl HistoryState {
         self.diff_target = target;
         if !self.demo {
             self.loader = None;
-            self.diff_incoming.clear();
-            self.diff_lines.clear();
+            self.diff_model = None;
             self.diff_error.clear();
             self.diff_revision.clear();
         }
@@ -340,8 +344,7 @@ impl HistoryState {
         if open {
             if !self.demo {
                 self.loader = None;
-                self.diff_incoming.clear();
-                self.diff_lines.clear();
+                self.diff_model = None;
                 self.diff_error.clear();
                 self.diff_revision.clear();
             }
@@ -358,14 +361,13 @@ impl HistoryState {
             return;
         }
         self.loader = None;
-        self.diff_incoming.clear();
-        self.diff_lines.clear();
+        self.diff_model = None;
         self.diff_error.clear();
         self.diff_revision.clear();
         self.queue_preview();
     }
 
-    fn tick(&mut self, ctx: &egui::Context, globals: &[String], flags: &[String]) {
+    fn tick(&mut self, ctx: &egui::Context, globals: &[String]) {
         self.poll_loader();
 
         if !self.demo && self.diff_open && self.loader.is_none() {
@@ -374,7 +376,7 @@ impl HistoryState {
                     self.pending = None;
                     let dir = self.dir.clone();
                     let root = self.root.clone();
-                    self.start_loader(&dir, &root, globals, flags);
+                    self.start_loader(&dir, &root, globals);
                 }
             }
         }
@@ -384,7 +386,7 @@ impl HistoryState {
         }
     }
 
-    fn start_loader(&mut self, dir: &Path, root: &str, globals: &[String], flags: &[String]) {
+    fn start_loader(&mut self, dir: &Path, root: &str, globals: &[String]) {
         let Some(index) = self.selected else {
             return;
         };
@@ -392,60 +394,45 @@ impl HistoryState {
             return;
         };
         let revision = node.revision.clone();
-        let previous = if self.diff_target == Target::Previous {
-            self.history.previous_revision(index)
-        } else {
-            None
+        let (left, right) = match self.diff_target {
+            Target::Previous => {
+                let Some(previous) = self.history.previous_revision(index) else {
+                    self.diff_model = None;
+                    self.diff_error = "Initial revision — no previous revision to compare.".into();
+                    self.diff_loading = false;
+                    self.diff_revision = revision;
+                    return;
+                };
+                (Side::Revision(previous), Side::Revision(revision.clone()))
+            }
+            Target::Working => (Side::Revision(revision.clone()), Side::WorkingCopy),
         };
 
-        if self.diff_target == Target::Previous && previous.is_none() {
-            self.diff_lines = vec!["Initial revision — no previous revision to compare.".into()];
-            self.diff_error.clear();
-            self.diff_loading = false;
-            self.diff_revision = revision;
-            return;
-        }
-
-        let args = history_preview::diff_args(
-            &self.file,
-            &revision,
-            previous.as_deref(),
-            flags,
-            root,
-            globals,
-        );
-        self.diff_incoming.clear();
+        self.diff_model = None;
         self.diff_error.clear();
         self.diff_loading = true;
-        self.loader = Some(Loader::start(dir, args, revision, self.diff_target));
+        self.loader = Some(Loader::start(
+            dir.to_path_buf(),
+            root.to_string(),
+            globals.to_vec(),
+            self.file.clone(),
+            left,
+            right,
+            revision,
+            self.diff_target,
+        ));
     }
 
     fn poll_loader(&mut self) {
-        let Some(loader) = self.loader.as_mut() else {
+        let Some(loader) = self.loader.as_ref() else {
             return;
         };
-        let mut finished: Option<Result<i32, String>> = None;
-        loop {
-            match loader.rx.try_recv() {
-                Ok(Msg::Line(line)) => self.diff_incoming.push(line),
-                Ok(Msg::Done(code)) => {
-                    finished = Some(Ok(code));
-                    break;
-                }
-                Ok(Msg::Failed(error)) => {
-                    finished = Some(Err(error));
-                    break;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    finished = Some(Err("the diff preview stopped".into()));
-                    break;
-                }
+        let message = match loader.rx.try_recv() {
+            Ok(message) => message,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Msg::Failed("the diff preview stopped".into())
             }
-        }
-
-        let Some(finished) = finished else {
-            return;
         };
         let loader = self.loader.take().expect("the loader was just borrowed");
         let current = self
@@ -456,26 +443,19 @@ impl HistoryState {
             return;
         }
 
-        match finished {
-            Ok(code) if history_preview::success_code(code) => {
-                let mut lines = std::mem::take(&mut self.diff_incoming);
-                if lines.is_empty() {
-                    lines.push("No changes.".to_string());
-                }
-                self.diff_lines = lines;
+        match message {
+            Msg::Ready(pair) => {
+                let model = DiffModel::build(pair.left, pair.right, DiffOptions::default());
+                self.diff_model = Some(model);
+                self.diff_generation = self.diff_generation.wrapping_add(1);
                 self.diff_error.clear();
                 self.diff_loading = false;
                 self.diff_revision = loader.revision.clone();
             }
-            Ok(code) => {
-                self.diff_error = format!("cvs diff failed (exit code {})", code);
-                self.diff_loading = false;
-                self.diff_incoming.clear();
-            }
-            Err(error) => {
+            Msg::Failed(error) => {
+                self.diff_model = None;
                 self.diff_error = error;
                 self.diff_loading = false;
-                self.diff_incoming.clear();
             }
         }
     }
@@ -512,7 +492,7 @@ impl HistoryState {
             self.loader = None;
             self.pending = None;
             self.diff_loading = false;
-            self.diff_lines.clear();
+            self.diff_model = None;
             self.diff_error.clear();
             self.diff_revision.clear();
             return;
@@ -533,9 +513,8 @@ pub(super) fn show(
     ctx: &egui::Context,
     state: &mut HistoryState,
     globals: &[String],
-    flags: &[String],
 ) -> Option<DialogAction> {
-    state.tick(ctx, globals, flags);
+    state.tick(ctx, globals);
 
     let mut open = true;
     let mut action = None;
@@ -587,10 +566,10 @@ fn diff_window(ctx: &egui::Context, state: &mut HistoryState) {
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width(720.0)
-        .default_height(420.0)
-        .min_width(420.0)
-        .min_height(220.0)
+        .default_width(1100.0)
+        .default_height(650.0)
+        .min_width(640.0)
+        .min_height(320.0)
         .show(ctx, |ui| diff(ui, state));
 
     if !open {
@@ -1181,15 +1160,6 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
                     Target::Working => format!("{} → local file", node.revision),
                 };
                 ui.label(egui::RichText::new(range).small().color(MUTED));
-                if state.diff_target == Target::Previous {
-                    if let Some((added, removed)) = node.lines {
-                        ui.label(
-                            egui::RichText::new(format!("+{} −{}", added, removed))
-                                .small()
-                                .color(MUTED),
-                        );
-                    }
-                }
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1213,33 +1183,22 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
         });
     });
 
-    let body = if state.selected.is_none() {
-        "Select a revision.".to_string()
-    } else if state.diff_lines.is_empty() {
-        if state.diff_loading {
-            "Loading diff…".to_string()
-        } else if !state.diff_error.is_empty() {
-            "No diff available.".to_string()
-        } else {
-            "No changes.".to_string()
-        }
+    if state.selected.is_none() {
+        ui.label("Select a revision.");
+        return;
+    }
+    if state.diff_loading && state.diff_model.is_none() {
+        ui.label("Loading diff…");
+        return;
+    }
+    if let Some(model) = &state.diff_model {
+        let generation = state.diff_generation;
+        state.diff_view.show(ui, model, generation);
+    } else if state.diff_error.is_empty() {
+        ui.label("No changes.");
     } else {
-        state.diff_lines.join("\n")
-    };
-
-    egui::ScrollArea::both()
-        .id_salt("file_history_diff")
-        .max_height(ui.available_height().max(60.0))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let mut view = body.as_str();
-            ui.add(
-                egui::TextEdit::multiline(&mut view)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(8)
-                    .font(egui::TextStyle::Monospace),
-            );
-        });
+        ui.label("No diff available.");
+    }
 }
 
 fn status(ui: &mut egui::Ui, state: &HistoryState) {
@@ -1405,7 +1364,7 @@ mod tests {
         assert_eq!(state.selected, Some(index));
         assert!(state.pending.is_none(), "a closed diff runs nothing");
         assert!(!state.diff_loading);
-        assert!(state.diff_lines.is_empty());
+        assert!(state.diff_model.is_none());
     }
 
     #[test]
@@ -1445,6 +1404,52 @@ mod tests {
             "the preview waits for the debounce"
         );
         assert!(state.diff_loading, "the diff pane shows its loading state");
+    }
+
+    #[test]
+    fn the_demo_diff_window_draws_both_complete_versions() {
+        let mut state = HistoryState::demo(
+            std::path::PathBuf::from("."),
+            String::new(),
+            "main.c".into(),
+            "1.4".into(),
+            sample().history,
+        );
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 600.0),
+        ));
+        let output = crate::app::ui::test_run(&ctx, input, |ui| diff(ui, &mut state));
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_string()),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        for expected in [
+            "main.c @ 1.4",
+            "main.c @ 1.5",
+            "int main(void) { return 0; }",
+            "int main(void) { return 1; }",
+        ] {
+            assert!(
+                texts.iter().any(|text| text == expected),
+                "the diff window did not draw {expected:?}: {texts:?}"
+            );
+        }
     }
 
     #[test]

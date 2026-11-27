@@ -3,12 +3,15 @@
 
 pub mod cvs;
 pub mod demo;
+pub mod diff;
 pub mod entries;
 pub mod filekind;
 pub mod graph;
 pub mod history;
 pub mod prefs;
 pub mod remote;
+pub mod sidediff;
 pub mod tags;
+pub mod temp;
 pub mod text;
 pub mod util;

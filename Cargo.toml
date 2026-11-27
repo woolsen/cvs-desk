@@ -20,6 +20,11 @@ path = "src/lib.rs"
 [dependencies]
 eframe = "0.37"
 egui = { version = "0.37", features = ["default_fonts"] }
+# The side-by-side diff view: `similar` pairs the lines and `egui_extras` turns each
+# file into a highlighted `LayoutJob`. The syntect feature is pure Rust here: egui_extras
+# asks for `default-fancy`, not the default oniguruma backend.
+egui_extras = { version = "0.37", default-features = false, features = ["syntect"] }
+similar = { version = "3.2", features = ["inline"] }
 # Remix Icon as a font: the browser's file-type icons, with no image assets to ship.
 # The crate has no 0.37 release, but the font and the icon constants do not depend on
 # egui; turning its `egui` feature off lets the same assets ride along with egui 0.37.

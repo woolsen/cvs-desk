@@ -797,7 +797,7 @@ fn message_temp_path() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("cvsmsg-{}-{}.txt", std::process::id(), nanos))
+    crate::core::temp::messages_dir().join(format!("cvsmsg-{}-{}.txt", std::process::id(), nanos))
 }
 
 fn save_log_message(message: &str) -> std::io::Result<PathBuf> {

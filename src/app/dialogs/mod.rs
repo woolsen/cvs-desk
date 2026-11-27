@@ -84,7 +84,6 @@ impl App {
         let kind_label = self.folder_kind().unwrap_or("").to_string();
         let dir = self.dir.display().to_string();
         let history_globals = self.prefs.globals();
-        let history_flags = self.prefs.diff_flags();
         let busy = self.runner.running;
         let has_cvs = self.has_cvs;
         let action = {
@@ -135,9 +134,7 @@ impl App {
                 ),
                 Dialog::Preferences { tab, draft } => preferences::show(ctx, tab, draft),
                 Dialog::CommandLine { text } => command_line::show(ctx, text, &cvsroot),
-                Dialog::History(state) => {
-                    history::show(ctx, state, &history_globals, &history_flags)
-                }
+                Dialog::History(state) => history::show(ctx, state, &history_globals),
                 Dialog::About => about::show(ctx, &cvsroot, &kind_label, &repository, &dir),
             }
         };

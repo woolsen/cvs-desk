@@ -20,12 +20,12 @@ use crate::app::shot::ShotJob;
 mod actions;
 mod dialogs;
 mod files;
-mod history_preview;
 mod nav;
 mod remote;
 mod shot;
 mod trash;
 mod ui;
+mod version_loader;
 
 #[cfg(test)]
 mod tests;
@@ -228,6 +228,10 @@ impl App {
             style.visuals = egui::Visuals::light();
         });
         ui::typography::install(&cc.egui_ctx);
+
+        // One place owns the program's temporary folders: a crashed full-file diff
+        // must not leave a revision checkout behind forever.
+        let _ = cvsdesk::temp::cleanup_stale();
 
         let mut prefs = Prefs::load().unwrap_or_default();
         // A folder named on the command line wins; without one, reopen the folder the
