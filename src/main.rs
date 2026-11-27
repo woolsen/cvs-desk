@@ -1,8 +1,8 @@
 //! The window: menu bar, folder pane, file list, output pane and dialogs.
 //!
 //! Everything that has a rule worth checking lives in the `cvsdesk` library (see `lib.rs`);
-//! this file starts the program. The window itself is in `app/`. See `CONTRIBUTING.md` for
-//! the project layout.
+//! this file starts the program. The window itself is in `app/`. See `.github/CONTRIBUTING.md`
+//! for the project layout.
 
 mod app;
 

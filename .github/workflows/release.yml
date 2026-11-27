@@ -54,7 +54,7 @@ jobs:
           tool: cargo-about@0.9.1
 
       - name: Generate license notices
-        run: cargo about generate --locked --output-file third-party-licenses.txt about.hbs
+        run: cargo about generate --locked --config .github/about.toml --output-file third-party-licenses.txt .github/about.hbs
 
       - name: Check the license notices
         shell: pwsh

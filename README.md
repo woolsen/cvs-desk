@@ -72,7 +72,7 @@ or account. See `tests/README.md` for the optional test against a real working c
 
 ## Contributing
 
-See `CONTRIBUTING.md`. Bug reports and feature requests are welcome. Code contributions require
+See `.github/CONTRIBUTING.md`. Bug reports and feature requests are welcome. Code contributions require
 a signed contributor license agreement so the project can also be offered under different
 commercial terms.
 
