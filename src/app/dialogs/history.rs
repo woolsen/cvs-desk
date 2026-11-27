@@ -563,7 +563,12 @@ pub(super) fn show(
         ctx.send_viewport_cmd_to(history_viewport_id(), egui::ViewportCommand::Focus);
     }
 
-    if state.diff_open {
+    // Keep the diff window warm from the first frame of a normal run. Creating a
+    // native window and its wgpu surface is expensive, and doing it inside the frame
+    // of the Diff… click froze the window for a moment; building it here moves that
+    // cost to the frame that opens the history, while the user is already waiting for
+    // the log. A screenshot run (`raise == false`) only builds it when it is open.
+    if state.diff_open || raise {
         diff_window(ctx, state, raise);
     }
 
@@ -591,37 +596,55 @@ fn diff_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("file_history_diff")
 }
 
-fn diff_viewport(state: &HistoryState, active: bool) -> egui::ViewportBuilder {
+fn diff_viewport(state: &HistoryState, visible: bool, active: bool) -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
         .with_title(format!("Diff — {}", state.file))
         .with_inner_size([1100.0, 650.0])
         .with_min_inner_size([640.0, 320.0])
+        .with_visible(visible)
         .with_active(active)
 }
 
 /// The diff is its own OS window beside the history window, so the user can keep
 /// clicking revisions and watch the diff follow the selection, even on another monitor.
+///
+/// The window is created hidden with the history window and stays alive while the
+/// history is open. Closing the diff only hides it: a new native window and its wgpu
+/// surface are expensive, and creating them in the frame of the Diff… click froze the
+/// whole application for a moment.
 fn diff_window(ctx: &egui::Context, state: &mut HistoryState, raise: bool) {
-    let mut open = true;
+    let visible = state.diff_open;
+    let mut close_requested = false;
+
     ctx.show_viewport_immediate(
         diff_viewport_id(),
-        diff_viewport(state, raise),
+        // `active` must not follow `visible`: changing it makes egui recreate the
+        // window, which is the cost this function avoids. The explicit Focus command
+        // below raises the window when it opens.
+        diff_viewport(state, visible, raise),
         |ui, _class| {
+            if !visible {
+                // A hidden viewport still runs its UI and paints. Drawing nothing
+                // keeps the price of keeping it warm negligible.
+                return;
+            }
             egui::CentralPanel::default().show(ui, |ui| diff(ui, state));
             if ui.ctx().input(|i| i.viewport().close_requested()) {
-                open = false;
+                close_requested = true;
             }
         },
     );
 
-    if raise && state.diff_raise {
+    if visible && raise && state.diff_raise {
         state.diff_raise = false;
         ctx.send_viewport_cmd_to(diff_viewport_id(), egui::ViewportCommand::Focus);
     }
 
-    if !open {
+    if close_requested {
         state.set_diff_open(false);
-        // The window disappears on the pass that stops asking for it.
+        // Hide the window instead of dropping its viewport: the next Diff… must not
+        // create another native window.
+        ctx.send_viewport_cmd_to(diff_viewport_id(), egui::ViewportCommand::Visible(false));
         ctx.request_repaint();
     }
 }
@@ -1433,6 +1456,29 @@ mod tests {
         assert!(!state.diff_open, "the diff must close when its window does");
         assert!(state.pending.is_none(), "the debounce is dropped");
         assert!(!state.diff_loading, "the spinner stops");
+    }
+
+    #[test]
+    fn a_prewarm_pass_keeps_the_diff_preview_idle() {
+        let mut state = sample();
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(920.0, 650.0),
+        ));
+
+        // A normal run keeps the diff window warm from the first frame. That pass must
+        // not look like an opened window: no preview may start before the user asks.
+        crate::app::ui::test_run(&ctx, input, |ui| {
+            let _ = show(ui.ctx(), &mut state, &[], true);
+        });
+
+        assert!(!state.diff_open, "prewarming must not open the window");
+        assert!(state.pending.is_none(), "prewarming runs no diff");
+        assert!(!state.diff_loading, "the spinner stays still");
+        assert!(state.diff_model.is_none());
     }
 
     #[test]
