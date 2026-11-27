@@ -19,9 +19,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use flate2::Compression;
+use flate2::{Compression, Decompress, FlushDecompress, Status};
 
 use crate::client::engine::{CancelToken, Sink};
 use crate::client::error::{Error, Result};
@@ -89,36 +88,94 @@ impl Canceller {
     }
 }
 
-/// A zlib decoder that opens the stream on the first read.
+/// One direction of the `Gzip-stream` compression: a zlib stream over the connection.
 ///
-/// `flate2` parses the zlib header when a decoder is constructed, and that read blocks until
-/// the server has written something. Compression is turned on before the command is sent, so
-/// constructing it eagerly would wait for a header the server will not write until it has
-/// received that command. Deferring the construction breaks the circle.
-struct LazyZlibDecoder<R> {
-    source: Option<R>,
-    inner: Option<ZlibDecoder<R>>,
+/// `flate2`'s read-side decoder asks its source for more input before it drains output the
+/// decompressor is already holding. A CVS server keeps the socket open after a reply, so that
+/// read waits forever whenever the tail of a reply sits inside the decoder. This reader always
+/// drains the decompressor first and reads the pipe only when it has no output left.
+///
+/// Building it does not touch the pipe: compression is turned on before the command is sent,
+/// and the server writes nothing until it has that command.
+struct ZlibStream<R> {
+    source: R,
+    decompress: Decompress,
+    input: Vec<u8>,
+    pos: usize,
+    /// A fresh chunk buffer, reused for every read from the pipe.
+    chunk: Vec<u8>,
+    ended: bool,
 }
 
-impl<R: Read> LazyZlibDecoder<R> {
+impl<R: Read> ZlibStream<R> {
     fn new(source: R) -> Self {
         Self {
-            source: Some(source),
-            inner: None,
+            source,
+            decompress: Decompress::new(true),
+            input: Vec::new(),
+            pos: 0,
+            chunk: vec![0u8; 32 * 1024],
+            ended: false,
         }
     }
 }
 
-impl<R: Read> Read for LazyZlibDecoder<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.inner.is_none() {
-            let source = self
-                .source
-                .take()
-                .expect("the decoder source is only taken once");
-            self.inner = Some(ZlibDecoder::new(source));
+impl<R: Read> Read for ZlibStream<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
         }
-        self.inner.as_mut().unwrap().read(buf)
+        loop {
+            if self.ended {
+                return Ok(0);
+            }
+            let before_in = self.decompress.total_in();
+            let before_out = self.decompress.total_out();
+            let status = self
+                .decompress
+                .decompress(&self.input[self.pos..], out, FlushDecompress::None)
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("corrupt compressed stream: {}", error),
+                    )
+                })?;
+            let consumed = (self.decompress.total_in() - before_in) as usize;
+            let produced = (self.decompress.total_out() - before_out) as usize;
+            self.pos += consumed;
+            if produced > 0 {
+                return Ok(produced);
+            }
+            if status == Status::StreamEnd {
+                self.ended = true;
+                return Ok(0);
+            }
+            if consumed > 0 {
+                // Progress was made; the next pass may produce output from the bytes left.
+                continue;
+            }
+            // The decoder needs more input. A header can be split across reads, so give it
+            // every byte the pipe has, but never buffer an unbounded broken stream.
+            const MAX_PENDING: usize = 1024 * 1024;
+            if self.input.len() - self.pos > MAX_PENDING {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the compressed stream made no progress",
+                ));
+            }
+            if self.pos > 0 {
+                self.input.drain(..self.pos);
+                self.pos = 0;
+            }
+            let read = self.source.read(&mut self.chunk)?;
+            if read == 0 {
+                // The peer closed its end. The reply ended with it; anything still pending
+                // has already been drained above.
+                self.ended = true;
+                return Ok(0);
+            }
+            self.input.extend_from_slice(&self.chunk[..read]);
+        }
     }
 }
 
@@ -264,7 +321,7 @@ impl Connection {
 
         let reader = std::mem::replace(&mut self.reader, BufReader::new(Box::new(io::empty())));
         let reader = reader.into_inner();
-        self.reader = BufReader::new(Box::new(LazyZlibDecoder::new(reader)));
+        self.reader = BufReader::new(Box::new(ZlibStream::new(reader)));
         Ok(())
     }
 
@@ -640,5 +697,73 @@ mod tests {
             "the child's pipe stayed open after the stop"
         );
         reader.join().unwrap();
+    }
+
+    /// A source that hands out its bytes, then waits for permission to report EOF. It
+    /// stands in for a server that keeps the connection open after its reply.
+    struct OpenStream {
+        data: Vec<u8>,
+        pos: usize,
+        gate: mpsc::Receiver<()>,
+    }
+
+    impl Read for OpenStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos == self.data.len() {
+                let _ = self.gate.recv();
+                return Ok(0);
+            }
+            let count = buf.len().min(self.data.len() - self.pos);
+            buf[..count].copy_from_slice(&self.data[self.pos..self.pos + count]);
+            self.pos += count;
+            Ok(count)
+        }
+    }
+
+    /// A compressed reply can end while the server keeps the socket open. Once every
+    /// compressed byte has arrived, the rest of the reply may still sit inside the
+    /// decompressor; asking the socket for more input first waits forever.
+    #[test]
+    fn a_complete_compressed_reply_does_not_wait_for_more_input() {
+        let mut text = String::new();
+        for i in 0..1500 {
+            text.push_str(&format!("\tTAG_{:04}: 1.{}\n", i, i % 20));
+        }
+        text.push_str("ok\n");
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(9));
+        encoder.write_all(text.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut conn = Connection::from_parts_for_test(
+                Box::new(OpenStream {
+                    data: compressed,
+                    pos: 0,
+                    gate: release_rx,
+                }),
+                Box::new(Vec::new()),
+            );
+            conn.compress(9).unwrap();
+            let mut lines = 0;
+            loop {
+                match conn.read_line() {
+                    Ok(Some(line)) if line == b"ok" => break,
+                    Ok(Some(_)) => lines += 1,
+                    Ok(None) => break,
+                    Err(error) => panic!("read failed: {}", error),
+                }
+            }
+            let _ = done_tx.send(lines);
+            conn.close();
+        });
+
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        let _ = release_tx.send(());
+        assert_eq!(
+            result.expect("the decoder waited for input although the reply was complete"),
+            1500
+        );
     }
 }
