@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use cvsdesk::cvs::Cmd;
-use cvsdesk::entries::{self, Origin, State};
+use cvsdesk::entries::{self, Origin, Row, State};
 use cvsdesk::filekind::FileKind;
 use cvsdesk::prefs::ViewScope;
 use cvsdesk::util::truncate_columns;
@@ -147,6 +147,20 @@ fn field_height(ui: &egui::Ui) -> f32 {
         .size()
         .y;
     row + 2.0 * FIELD_MARGIN.y
+}
+
+/// The scroll offset that puts `name` back at the viewport top after the order was rebuilt.
+fn anchored_offset(
+    order: &[usize],
+    rows: &[Row],
+    name: &str,
+    within: f32,
+    row_h: f32,
+) -> Option<f32> {
+    let pos = order
+        .iter()
+        .position(|&index| rows.get(index).is_some_and(|row| row.name == name))?;
+    Some(pos as f32 * row_h + within)
 }
 
 impl App {
@@ -816,13 +830,7 @@ impl App {
         // could never line the rows up with a heading band that stays put.
         let mut restore = None;
         if let Some((name, within)) = self.pending_scroll.take() {
-            if let Some(pos) = self
-                .order
-                .iter()
-                .position(|&index| self.rows[index].name == name)
-            {
-                restore = Some(pos as f32 * row_h + within);
-            }
+            restore = anchored_offset(&self.order, &self.rows, &name, within, row_h);
         }
         let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -2186,6 +2194,34 @@ mod tests {
         assert!(
             texts < 500,
             "painted {texts} text shapes for 20,000 rows; the list must paint only the visible rows"
+        );
+    }
+
+    #[test]
+    fn a_restored_row_keeps_its_place_when_names_arrive_above_it() {
+        let old = vec![
+            row("a.txt", false),
+            row("b.txt", false),
+            row("c.txt", false),
+        ];
+        assert_eq!(
+            anchored_offset(&[0, 1, 2], &old, "b.txt", 3.0, 46.0),
+            Some(49.0)
+        );
+
+        let new = vec![
+            row("a.txt", false),
+            row("aa.txt", false),
+            row("b.txt", false),
+            row("c.txt", false),
+        ];
+        assert_eq!(
+            anchored_offset(&[0, 1, 2, 3], &new, "b.txt", 3.0, 46.0),
+            Some(95.0)
+        );
+        assert_eq!(
+            anchored_offset(&[0, 1, 2, 3], &new, "gone.txt", 3.0, 46.0),
+            None
         );
     }
 }
