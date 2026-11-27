@@ -53,7 +53,9 @@ pub(super) struct Filters {
 impl Default for Filters {
     fn default() -> Self {
         Self {
-            scope: ViewScope::WorkingCopy,
+            // A folder opens with every name in it: the working copy's rows together
+            // with the repository's not checked out files.
+            scope: ViewScope::All,
             unchanged: true,
             changed: true,
             added: true,
@@ -268,15 +270,21 @@ impl Filters {
 
     pub(super) fn apply_preset(&mut self, preset: FilterPreset) {
         let mut filters = Self::default();
+        // The default view shows every name, so a preset that is about the working copy
+        // sets its scope back explicitly instead of inheriting the default.
         match preset {
-            FilterPreset::WorkingCopy => {}
+            FilterPreset::WorkingCopy => {
+                filters.scope = ViewScope::WorkingCopy;
+            }
             FilterPreset::MyChanges => {
+                filters.scope = ViewScope::WorkingCopy;
                 filters.unchanged = false;
                 filters.unknown = false;
                 filters.missing = false;
                 filters.folders = false;
             }
             FilterPreset::NeedsAttention => {
+                filters.scope = ViewScope::WorkingCopy;
                 filters.unchanged = false;
                 filters.changed = false;
                 filters.added = false;
@@ -288,6 +296,7 @@ impl Filters {
                 filters.scope = ViewScope::NotCheckedOut;
             }
             FilterPreset::Untracked => {
+                filters.scope = ViewScope::WorkingCopy;
                 filters.unchanged = false;
                 filters.changed = false;
                 filters.added = false;
@@ -870,7 +879,15 @@ mod tests {
     #[test]
     fn presets_set_the_expected_scope_and_states() {
         let mut filters = Filters::default();
+        assert_eq!(
+            filters.preset(),
+            FilterPreset::AllNames,
+            "a folder opens showing every name"
+        );
+
+        filters.apply_preset(FilterPreset::WorkingCopy);
         assert_eq!(filters.preset(), FilterPreset::WorkingCopy);
+        assert_eq!(filters.scope, ViewScope::WorkingCopy);
 
         filters.apply_preset(FilterPreset::MyChanges);
         assert_eq!(filters.preset(), FilterPreset::MyChanges);
@@ -944,8 +961,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_filters_are_the_working_copy_scope() {
-        assert_eq!(Filters::default().scope, ViewScope::WorkingCopy);
+    fn the_default_filters_show_every_name() {
+        assert_eq!(Filters::default().scope, ViewScope::All);
     }
 
     #[test]
@@ -954,14 +971,14 @@ mod tests {
         remote.origin = Origin::Remote;
         remote.state = State::Remote;
 
-        let working_copy = Filters::default();
+        let working_copy = Filters {
+            scope: ViewScope::WorkingCopy,
+            ..Filters::default()
+        };
         assert!(!working_copy.shows(&remote));
         assert!(!working_copy.enabled(State::Remote));
 
-        let mut all = Filters {
-            scope: ViewScope::All,
-            ..Filters::default()
-        };
+        let mut all = Filters::default();
         assert!(all.shows(&remote));
 
         let mut remote_folder = row("server-folder", true);

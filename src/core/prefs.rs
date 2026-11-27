@@ -20,7 +20,9 @@ pub enum ViewScope {
 
 impl Default for ViewScope {
     fn default() -> Self {
-        Self::WorkingCopy
+        // The list opens showing every name, including the repository's files this
+        // folder has not checked out. Picking "Local" still narrows it for that session.
+        Self::All
     }
 }
 
@@ -1054,8 +1056,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_scope_is_the_working_copy() {
-        assert_eq!(ViewState::default().scope, ViewScope::WorkingCopy);
+    fn the_default_scope_shows_every_name() {
+        assert_eq!(ViewState::default().scope, ViewScope::All);
     }
 
     #[test]
