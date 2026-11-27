@@ -8,6 +8,7 @@ pub mod base;
 pub mod codec;
 pub mod dir;
 pub mod entries;
+pub mod glob;
 pub mod patch;
 pub mod skeleton;
 pub mod writer;

@@ -1,10 +1,12 @@
 //! `cvs rtag`: put a symbolic tag on repository modules, with no working copy.
 //!
-//! Every flag, the tag name and each module are plain `Argument`s; there are no
-//! `Directory`/`Entry` blocks. `-n` ("no execution of 'tag program'") is sent like any other
-//! flag and the server decides what to do with it, exactly as the reference does.
+//! Every flag, the `--` that ends them, the tag name and each module are plain `Argument`s;
+//! there are no `Directory`/`Entry` blocks. `-n` ("no execution of 'tag program'") is sent
+//! like any other flag and the server decides what to do with it, exactly as the reference
+//! does.
 
 use crate::client::cli;
+use crate::client::commands::tag::{check_date, check_tag_name};
 use crate::client::commands::{date, targets};
 use crate::client::engine::{CancelToken, Sink};
 use crate::client::error::{Error, Result};
@@ -15,6 +17,8 @@ use crate::client::root::Root;
 struct Options {
     clear_removed: bool,
     branch: bool,
+    /// `-B`: let `-F`/`-d` move or delete a branch tag.
+    disturb_branch: bool,
     delete: bool,
     move_tag: bool,
     force: bool,
@@ -26,7 +30,8 @@ struct Options {
     modules: Vec<String>,
 }
 
-/// `rtag` stops taking options at the tag name, as `tag` does.
+/// `rtag` stops taking options at the tag name, as `tag` does. Clusters are split the way
+/// getopt splits them, including a value attached to `-r`/`-D`.
 fn parse_args(args: &[String]) -> Result<Options> {
     let mut opts = Options {
         recursive: true,
@@ -44,38 +49,57 @@ fn parse_args(args: &[String]) -> Result<Options> {
             operands = &args[i..];
             break;
         }
-        match arg.as_str() {
-            "-a" => opts.clear_removed = true,
-            "-b" => opts.branch = true,
-            "-d" => opts.delete = true,
-            "-F" => opts.move_tag = true,
-            "-f" => opts.force = true,
-            "-l" => opts.recursive = false,
-            "-R" => opts.recursive = true,
-            "-n" => opts.no_execute = true,
-            "-r" | "-D" => {
-                i += 1;
-                let value = args.get(i).ok_or_else(|| {
-                    Error::aborted("rtag", format!("option {} requires an argument", arg))
-                })?;
-                if arg == "-r" {
-                    opts.revision = Some(value.clone());
-                } else {
-                    opts.date = Some(value.clone());
+        let body = &arg[1..];
+        let mut offset = 0;
+        while offset < body.len() {
+            let option = body[offset..]
+                .chars()
+                .next()
+                .expect("offset is a char boundary");
+            let next = offset + option.len_utf8();
+            match option {
+                'a' => opts.clear_removed = true,
+                'b' => opts.branch = true,
+                'B' => opts.disturb_branch = true,
+                'd' => opts.delete = true,
+                'F' => opts.move_tag = true,
+                'f' => opts.force = true,
+                'l' => opts.recursive = false,
+                'R' => opts.recursive = true,
+                'n' => opts.no_execute = true,
+                'q' | 'Q' => {
+                    // The reference sends these from its own newer client, so the command
+                    // refuses them when they are not a global option.
+                    return Err(Error::aborted(
+                        "rtag",
+                        "-q or -Q must be specified before \"rtag\"",
+                    ));
                 }
+                'r' | 'D' => {
+                    let attached = &body[next..];
+                    let value = if attached.is_empty() {
+                        i += 1;
+                        args.get(i).cloned().ok_or_else(|| {
+                            Error::plain(
+                                "rtag",
+                                format!("option requires an argument -- {}", option),
+                            )
+                        })?
+                    } else {
+                        attached.to_string()
+                    };
+                    if option == 'r' {
+                        opts.revision = Some(value);
+                    } else {
+                        check_date("rtag", &value)?;
+                        opts.date = Some(value);
+                    }
+                    offset = body.len();
+                    continue;
+                }
+                other => return Err(Error::plain("rtag", format!("invalid option -- {}", other))),
             }
-            other if other.starts_with("-r") && other.len() > 2 => {
-                opts.revision = Some(other[2..].to_string())
-            }
-            other if other.starts_with("-D") && other.len() > 2 => {
-                opts.date = Some(other[2..].to_string())
-            }
-            other => {
-                return Err(Error::plain(
-                    "rtag",
-                    format!("invalid option -- '{}'", other),
-                ))
-            }
+            offset = next;
         }
         i += 1;
     }
@@ -88,12 +112,20 @@ fn parse_args(args: &[String]) -> Result<Options> {
 
 /// Run `cvs rtag`.
 pub fn run(root: Root, args: &[String], cancel: &CancelToken, sink: &mut dyn Sink) -> Result<i32> {
-    let opts = parse_args(args)?;
+    let opts = match parse_args(args) {
+        Ok(opts) => opts,
+        Err(error) => {
+            sink.err(error.text().to_string());
+            let text = error.text();
+            if text.contains("invalid option --") || text.contains("option requires an argument") {
+                print_usage(sink);
+            }
+            return Ok(1);
+        }
+    };
     if opts.tag.is_empty() || opts.modules.is_empty() {
         // The reference prints the command's usage and exits 1, without a prefix.
-        if let Some(text) = cli::command_help("rtag") {
-            sink.err(text.to_string());
-        }
+        print_usage(sink);
         return Ok(1);
     }
     if opts.revision.is_some() && opts.date.is_some() {
@@ -105,12 +137,19 @@ pub fn run(root: Root, args: &[String], cancel: &CancelToken, sink: &mut dyn Sin
     if opts.branch && opts.delete {
         sink.err("cvs rtag: warning: -b ignored with -d options".to_string());
     }
+    check_tag_name("rtag", &opts.tag)?;
 
     let mut session = protocol::open(root, "rtag", cancel, sink)?;
     send_arguments(&mut session, &opts)?;
     let _ = targets::read_text(&mut session, false)?;
     session.close();
     Ok(0)
+}
+
+fn print_usage(sink: &mut dyn Sink) {
+    if let Some(text) = cli::command_help("rtag") {
+        sink.err(text.to_string());
+    }
 }
 
 /// The flags, the tag name and the modules, in the order the reference writes them.
@@ -120,6 +159,9 @@ fn send_arguments(session: &mut protocol::Session, opts: &Options) -> Result<()>
     }
     if opts.branch {
         session.argument("-b")?;
+    }
+    if opts.disturb_branch {
+        session.argument("-B")?;
     }
     if opts.delete {
         session.argument("-d")?;
@@ -144,6 +186,8 @@ fn send_arguments(session: &mut protocol::Session, opts: &Options) -> Result<()>
         session.argument("-D")?;
         session.argument(&date::normalize(date))?;
     }
+    // The server must not read the tag name or a module as one of its own options.
+    session.argument("--")?;
     session.argument(&opts.tag)?;
     for module in &opts.modules {
         session.argument(module)?;
@@ -162,9 +206,10 @@ mod tests {
 
     #[test]
     fn all_the_flags_are_read_before_the_tag_name() {
-        let opts = parse(&["-a", "-b", "-d", "-F", "-f", "-l", "-n", "T1", "mod"]).unwrap();
+        let opts = parse(&["-a", "-b", "-B", "-d", "-F", "-f", "-l", "-n", "T1", "mod"]).unwrap();
         assert!(opts.clear_removed);
         assert!(opts.branch);
+        assert!(opts.disturb_branch);
         assert!(opts.delete);
         assert!(opts.move_tag);
         assert!(opts.force);
@@ -172,6 +217,19 @@ mod tests {
         assert!(opts.no_execute);
         assert_eq!(opts.tag, "T1");
         assert_eq!(opts.modules, vec!["mod"]);
+    }
+
+    #[test]
+    fn clustered_flags_are_split_like_getopt() {
+        let opts = parse(&["-aBd", "T1", "mod"]).unwrap();
+        assert!(opts.clear_removed);
+        assert!(opts.disturb_branch);
+        assert!(opts.delete);
+
+        let opts = parse(&["-nbr1.1", "T1", "mod"]).unwrap();
+        assert!(opts.no_execute);
+        assert!(opts.branch);
+        assert_eq!(opts.revision.as_deref(), Some("1.1"));
     }
 
     #[test]
@@ -197,12 +255,11 @@ mod tests {
 
     #[test]
     fn a_missing_value_is_refused() {
-        for option in ["-r", "-D"] {
+        for option in ["-r", "-D", "-aBdFfr"] {
             let error = parse(&[option]).unwrap_err();
             assert!(
-                error
-                    .text()
-                    .contains(&format!("option {} requires an argument", option)),
+                error.text().contains("option requires an argument -- r")
+                    || error.text().contains("option requires an argument -- D"),
                 "{}",
                 error
             );
@@ -212,7 +269,41 @@ mod tests {
     #[test]
     fn an_unknown_option_is_refused() {
         let error = parse(&["-Z", "T1", "mod"]).unwrap_err();
-        assert!(error.text().contains("invalid option"), "{}", error);
+        assert!(error.text().contains("invalid option -- Z"), "{}", error);
+    }
+
+    #[test]
+    fn q_and_q_after_the_command_are_refused() {
+        for option in ["-q", "-Q"] {
+            let error = parse(&[option, "T1", "mod"]).unwrap_err();
+            assert!(
+                error
+                    .text()
+                    .contains("-q or -Q must be specified before \"rtag\""),
+                "{}",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_date_is_refused_before_connecting() {
+        let error = parse(&["-D", "garbage", "T1", "mod"]).unwrap_err();
+        assert!(
+            error.text().contains("Can't parse date/time: garbage"),
+            "{}",
+            error
+        );
+    }
+
+    #[test]
+    fn a_tag_name_must_follow_the_rcs_rule() {
+        let error = check_tag_name("rtag", "1.2").unwrap_err();
+        assert!(
+            error.text().contains("must start with a letter"),
+            "{}",
+            error
+        );
     }
 
     #[test]

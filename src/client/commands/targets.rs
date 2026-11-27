@@ -66,6 +66,8 @@ impl AddPlan {
 
 /// Work out which folders and files the answer should cover.
 pub fn collect(cwd: &Path, recursive: bool, names: &[String]) -> Result<BTreeMap<String, Target>> {
+    let expanded = crate::client::work::glob::expand_args(cwd, names);
+    let names = expanded.as_slice();
     let mut targets: BTreeMap<String, Target> = BTreeMap::new();
     if names.is_empty() {
         for dir in dir::walk(cwd, recursive)? {
@@ -127,6 +129,8 @@ pub fn collect_remove(
     recursive: bool,
     names: &[String],
 ) -> Result<BTreeMap<String, Target>> {
+    let expanded = crate::client::work::glob::expand_args(cwd, names);
+    let names = expanded.as_slice();
     let mut known = Vec::new();
     let mut loose = Vec::new();
     for name in names {
@@ -188,6 +192,8 @@ pub fn collect_remove(
 /// A file that is already in `Entries`, or is not on disk, cannot be added; both are the
 /// reference client's complaints. A folder that already has `CVS/` is versioned already.
 pub fn collect_add(cwd: &Path, names: &[String], options: &str) -> Result<AddPlan> {
+    let expanded = crate::client::work::glob::expand_args(cwd, names);
+    let names = expanded.as_slice();
     let repository = dir::read_repository(cwd)
         .ok_or_else(|| Error::aborted("add", "CVS/Repository is missing or empty"))?;
     let mut plan = AddPlan {
@@ -545,6 +551,28 @@ fn send_top_directory(session: &mut protocol::Session, cwd: &Path, command: &str
     session.directory(".", &top_absolute, cwd)
 }
 
+/// The options and the `--` that end them go before any folder block. The reference sends
+/// `Argument --` first, then `Max-dotdot` inside `send_files` (client.c:5606-5616).
+pub fn begin_files(session: &mut protocol::Session, names: &[String]) -> Result<()> {
+    session.argument("--")?;
+    let levels = names
+        .iter()
+        .map(|name| pathname_levels(name))
+        .max()
+        .unwrap_or(0);
+    if levels > 0 {
+        if session.supports("Max-dotdot") {
+            session.send(&format!("Max-dotdot {}", levels))?;
+        } else {
+            return Err(Error::aborted(
+                &session.command,
+                "backreference in path (`..') not supported by old (pre-Max-dotdot) servers",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The `Argument` lines for the names as typed, then the command name.
 pub fn finish_arguments(
     session: &mut protocol::Session,
@@ -558,9 +586,46 @@ pub fn finish_arguments(
     session.flush()
 }
 
+/// How many `..` components a path has, the way `pathname_levels` counts them.
+fn pathname_levels(name: &str) -> usize {
+    let mut level: isize = 0;
+    let mut max = 0;
+    for part in name.split(['/', '\\']) {
+        match part {
+            ".." => {
+                level += 1;
+                if level > max {
+                    max = level;
+                }
+            }
+            "." | "" => {}
+            _ => level -= 1,
+        }
+    }
+    max.max(0) as usize
+}
+
 /// Read the text-only answer of `status`, `log` or `diff`, printing it the way cvs does.
 /// Returns whether any text was printed, which is how `diff` decides its exit code.
 pub fn read_text(session: &mut protocol::Session, suppress_unknown_marks: bool) -> Result<bool> {
+    read_text_with(session, suppress_unknown_marks, false)
+}
+
+/// The same, but an empty `error` ends the command successfully. Only `diff`/`rdiff` use
+/// this: CVSNT ends a diff that found differences with an empty `error` instead of `ok`.
+/// Every other command must treat any `error` as a failure, as the reference client does.
+pub fn read_text_allow_empty_error(
+    session: &mut protocol::Session,
+    suppress_unknown_marks: bool,
+) -> Result<bool> {
+    read_text_with(session, suppress_unknown_marks, true)
+}
+
+fn read_text_with(
+    session: &mut protocol::Session,
+    suppress_unknown_marks: bool,
+    allow_empty_error: bool,
+) -> Result<bool> {
     let mut printed = false;
     loop {
         match session.read_response()? {
@@ -572,10 +637,8 @@ pub fn read_text(session: &mut protocol::Session, suppress_unknown_marks: bool) 
                 printed = true;
                 session.out(text);
             }
-            Response::Error { message, .. } if message.trim().is_empty() => {
-                // CVSNT ends a `diff` that found differences with an empty `error` instead
-                // of `ok`. The reference prints the empty message as a blank line and the
-                // command ends; the text already printed decides diff's exit code.
+            Response::Error { message, .. } if allow_empty_error && message.trim().is_empty() => {
+                // CVSNT's normal ending for a diff that found differences.
                 session.err(String::new());
                 return Ok(printed);
             }

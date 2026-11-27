@@ -11,9 +11,12 @@
 //! line would have used.
 
 use std::fmt;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::client::cli::{self, Invocation};
 use crate::client::commands;
@@ -21,7 +24,6 @@ use crate::client::error::{Error, Result};
 use crate::client::passfile;
 use crate::client::protocol;
 use crate::client::root::{self, Method};
-use crate::client::transport;
 
 /// One command to run.
 #[derive(Clone)]
@@ -206,6 +208,12 @@ fn run_command(
     match cli::canonical(name).as_str() {
         "version" => {
             let root = resolve_root(&opts, cwd, "version")?;
+            // A local root prints this client's banner and exits; there is nothing to ask
+            // (version.c:60-82).
+            if root.method == Method::Local {
+                sink.out(cli::banner());
+                return Ok(0);
+            }
             let mut session = protocol::open(root, "version", cancel, sink)?;
             let server = session.version()?;
             session.close();
@@ -218,29 +226,101 @@ fn run_command(
         }
         "login" => {
             let root = resolve_root(&opts, cwd, "login")?;
-            require_method(&root, "login", Method::Pserver)?;
-            let password = match &req.password {
-                Some(password) => password.clone(),
-                None => sink
-                    .secret("CVS password: ".to_string())
-                    .ok_or_else(|| Error::aborted("login", "no password given"))?,
+            if root.method != Method::Pserver {
+                return method_error(
+                    sink,
+                    "login",
+                    "can only use `login' command with the 'pserver' method",
+                    &root,
+                );
+            }
+            let canonical = passfile::canonical(&root);
+            sink.out(format!("Logging in to {}", canonical));
+
+            // A password written into CVSROOT is used without asking (login.c:544-547);
+            // anything typed is a new credential. The server has the last word either way,
+            // and a refused password must not replace a good entry in .cvspass.
+            let (password, verify_only) = match &root.password {
+                Some(password) => (password.clone(), true),
+                None => match &req.password {
+                    Some(password) => (password.clone(), false),
+                    None => match passfile::read_password("CVS password: ") {
+                        Some(password) => (password, false),
+                        None => {
+                            return Err(Error::aborted("login", "login: Failed to read password."))
+                        }
+                    },
+                },
             };
-            // Log in the way cvs does: the server has the last word, and a refused
-            // password must not replace a good entry in .cvspass.
-            let connection = transport::connect_with_password(&root, &password, "login", cancel)?;
-            drop(connection);
-            let path = passfile::set_password(&root.key, &password)?;
-            if opts.trace {
-                sink.err(format!("cvs login: saved in {}", path.display()));
+            if !login_handshake(&root, &password, verify_only, cancel, sink)? {
+                return Ok(1);
+            }
+            if !root.options.no_execute {
+                if passfile::passfile_path().is_none() {
+                    return Err(Error::aborted("login", "could not find out home directory"));
+                }
+                let mut warn = |line: String| sink.err(format!("cvs login: {}", line));
+                passfile::set_password_with(&root.key, &password, &mut warn)?;
             }
             Ok(0)
         }
         "logout" => {
             let root = resolve_root(&opts, cwd, "logout")?;
-            passfile::remove_password(&root.key)?;
+            if root.method != Method::Pserver {
+                return method_error(
+                    sink,
+                    "logout",
+                    "can only use pserver method with `logout' command",
+                    &root,
+                );
+            }
+            // logout is local only; it never opens a connection (login.c:655-709).
+            if root.options.quiet == 0 {
+                sink.out(format!("Logging out of {}", passfile::canonical(&root)));
+            }
+            if root.options.no_execute {
+                return Ok(0);
+            }
+            if passfile::passfile_path().is_none() {
+                return Err(Error::aborted(
+                    "logout",
+                    "could not find out home directory",
+                ));
+            }
+            match passfile::remove_password(&root.key) {
+                passfile::RemoveOutcome::Removed => {}
+                passfile::RemoveOutcome::NotFound => {
+                    sink.err("cvs logout: Entry not found.".to_string());
+                }
+                passfile::RemoveOutcome::Missing => {
+                    if let Some(path) = passfile::passfile_path() {
+                        sink.err(format!(
+                            "cvs logout: warning: failed to open {} for reading",
+                            path.display()
+                        ));
+                    }
+                    sink.err("cvs logout: Entry not found.".to_string());
+                }
+                passfile::RemoveOutcome::Unreadable(error) => {
+                    if let Some(path) = passfile::passfile_path() {
+                        sink.err(format!(
+                            "cvs logout: warning: failed to open {} for reading: {}",
+                            path.display(),
+                            error
+                        ));
+                    }
+                    sink.err("cvs logout: Entry not found.".to_string());
+                }
+            }
             Ok(0)
         }
         "noop" => {
+            if !args.is_empty() {
+                if let Some(text) = cli::command_help("noop") {
+                    sink.err(text.to_string());
+                }
+                return Ok(1);
+            }
             let root = resolve_root(&opts, cwd, "noop")?;
             let mut session = protocol::open(root, "noop", cancel, sink)?;
             session.simple("noop")?;
@@ -357,25 +437,165 @@ fn run_command(
     }
 }
 
-/// Resolve the root and carry the `-z` level into the connection settings.
+/// Resolve the root and carry the command-line settings into the connection settings.
 fn resolve_root(opts: &cli::Options, cwd: &Path, command: &str) -> Result<root::Root> {
     let (mut root, _) = root::resolve(opts.root.as_deref(), cwd, command)?;
-    root.compression = opts.compression;
+    root.options = root::WireOptions {
+        compression: opts.compression,
+        no_execute: opts.no_execute,
+        quiet: opts.quiet,
+        trace: opts.trace,
+        readonly: opts.readonly,
+        editor: opts.editor.clone(),
+    };
     Ok(root)
 }
 
-fn require_method(root: &root::Root, command: &str, method: Method) -> Result<()> {
-    if root.method != method {
+/// The two-line refusal CVS prints for `login`/`logout` on a root that is not `:pserver:`
+/// (login.c:534-538, 663-667). The root is shown without its password.
+fn method_error(sink: &mut dyn Sink, command: &str, text: &str, root: &root::Root) -> Result<i32> {
+    sink.err(format!("cvs {}: {}", command, text));
+    sink.err(format!(
+        "cvs [{} aborted]: CVSROOT: {}",
+        command,
+        root.display()
+    ));
+    Ok(1)
+}
+
+/// The verify-only pserver exchange `login` uses: no session follows, and the server closes
+/// the connection after answering. `E` lines are shown and the exchange continues; an
+/// `error` line is shown and the login fails; `I HATE YOU` is the ordinary refusal.
+///
+/// Returns `Ok(true)` when the server answered `I LOVE YOU` and `Ok(false)` when it sent an
+/// `error` line (already shown), so the caller exits 1 without adding a second message.
+fn login_handshake(
+    root: &root::Root,
+    password: &str,
+    verify_only: bool,
+    cancel: &CancelToken,
+    sink: &mut dyn Sink,
+) -> Result<bool> {
+    if root.proxy.is_some() {
         return Err(Error::aborted(
-            command,
-            format!(
-                "this command needs a :{}: root, not :{}:",
-                method.token(),
-                root.method.token()
-            ),
+            "login",
+            "proxy connections are not supported by this cvs yet",
         ));
     }
-    Ok(())
+
+    let stream = login_connect(&root.host, root.connect_port())?;
+    let _ = stream.set_nodelay(true);
+    let mut writer = stream;
+    let reader_stream = writer
+        .try_clone()
+        .map_err(|error| login_io_error(cancel, error))?;
+    let mut reader = BufReader::new(reader_stream);
+    let stopper = writer
+        .try_clone()
+        .map_err(|error| login_io_error(cancel, error))?;
+    // A stop must break the wait for `I LOVE YOU`, which can last as long as the server
+    // takes to check the password.
+    cancel.register(move || {
+        let _ = stopper.shutdown(Shutdown::Both);
+    });
+
+    let (begin, end) = if verify_only {
+        ("BEGIN VERIFICATION REQUEST", "END VERIFICATION REQUEST")
+    } else {
+        ("BEGIN AUTH REQUEST", "END AUTH REQUEST")
+    };
+    let scrambled = passfile::scramble(password.as_bytes());
+    for line in [begin.as_bytes(), root.path.as_bytes(), root.user.as_bytes()] {
+        writer
+            .write_all(line)
+            .and_then(|_| writer.write_all(b"\n"))
+            .map_err(|error| login_io_error(cancel, error))?;
+    }
+    writer
+        .write_all(&scrambled)
+        .and_then(|_| writer.write_all(b"\n"))
+        .and_then(|_| writer.write_all(end.as_bytes()))
+        .and_then(|_| writer.write_all(b"\n"))
+        .and_then(|_| writer.flush())
+        .map_err(|error| login_io_error(cancel, error))?;
+
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                return Err(Error::aborted(
+                    "login",
+                    "server closed the connection during login",
+                ))
+            }
+            Ok(_) => {}
+            Err(error) => return Err(login_io_error(cancel, error)),
+        }
+        let line = line.trim_end_matches(['\r', '\n']).to_string();
+        if line == "I LOVE YOU" {
+            return Ok(true);
+        }
+        if line == "I HATE YOU" {
+            return Err(Error::plain(
+                "login",
+                format!(
+                    "authorization failed: server {} rejected access to {} for user {}",
+                    root.host, root.path, root.user
+                ),
+            ));
+        }
+        if let Some(text) = line.strip_prefix("E ") {
+            sink.err(text.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("error ") {
+            let text = rest.split_once(' ').map(|(_, text)| text).unwrap_or("");
+            sink.err(text.to_string());
+            return Ok(false);
+        }
+        return Err(Error::aborted(
+            "login",
+            format!("unrecognized auth response from {}: {}", root.host, line),
+        ));
+    }
+}
+
+fn login_connect(host: &str, port: u16) -> Result<TcpStream> {
+    let address = format!("{}:{}", host, port);
+    let addrs: Vec<_> = address
+        .to_socket_addrs()
+        .map_err(|error| Error::aborted("login", format!("cannot resolve {}: {}", host, error)))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(Error::aborted(
+            "login",
+            format!("cannot resolve {}: no address", host),
+        ));
+    }
+    let mut last = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(30)) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(Error::aborted(
+        "login",
+        format!(
+            "connect to {}:{} failed: {}",
+            host,
+            port,
+            last.map(|error| error.to_string()).unwrap_or_default()
+        ),
+    ))
+}
+
+fn login_io_error(cancel: &CancelToken, error: std::io::Error) -> Error {
+    if cancel.is_cancelled() {
+        Error::interrupted("login")
+    } else {
+        Error::aborted("login", error.to_string())
+    }
 }
 
 /// A sink that keeps every line, in order, for tests to inspect.
@@ -496,6 +716,21 @@ mod tests {
         password: String,
         reply: &'static str,
     ) -> (String, std::thread::JoinHandle<()>, mpsc::Receiver<()>) {
+        login_server_with("BEGIN AUTH REQUEST", password, reply)
+    }
+
+    /// The same handshake with an explicit opening line, so a test can require the
+    /// verification request `login` uses when the password is already in CVSROOT.
+    fn login_server_with(
+        begin: &'static str,
+        password: String,
+        reply: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>, mpsc::Receiver<()>) {
+        let end = if begin == "BEGIN VERIFICATION REQUEST" {
+            "END VERIFICATION REQUEST"
+        } else {
+            "END AUTH REQUEST"
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (done_tx, done_rx) = mpsc::channel();
@@ -503,13 +738,7 @@ mod tests {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut writer = stream;
-            for expected in [
-                "BEGIN AUTH REQUEST",
-                "/repo",
-                "ann",
-                password.as_str(),
-                "END AUTH REQUEST",
-            ] {
+            for expected in [begin, "/repo", "ann", password.as_str(), end] {
                 assert_eq!(line(&mut reader), expected);
             }
             writer.write_all(reply.as_bytes()).unwrap();
@@ -616,7 +845,7 @@ mod tests {
         std::env::set_var("CVS_PASSFILE", &pass_path);
 
         let scrambled = String::from_utf8(passfile::scramble(b"secret")).unwrap();
-        let (root, server, done) = login_server(scrambled, "I LOVE YOU\n");
+        let (root, server, done) = login_server(scrambled.clone(), "I LOVE YOU\n");
         let mut sink = RecordingSink::default();
         let code = run(
             Request {
@@ -635,15 +864,312 @@ mod tests {
             "login did not contact the server"
         );
         server.join().unwrap();
-        let mut expected = root.as_bytes().to_vec();
-        expected.push(b' ');
-        expected.extend_from_slice(&passfile::scramble(b"secret"));
-        expected.push(b'\n');
-        assert_eq!(std::fs::read(&pass_path).unwrap(), expected);
-        assert!(sink.lines.is_empty(), "login says nothing when it works");
+        let canonical = passfile::canonical(&root::Root::parse(&root).unwrap());
+        let expected = format!("/1 {} {}\n", canonical, scrambled);
+        assert_eq!(std::fs::read(&pass_path).unwrap(), expected.into_bytes());
+        assert_eq!(
+            sink.lines,
+            vec![(Channel::Out, format!("Logging in to {}", canonical))]
+        );
 
         std::env::remove_var("CVS_PASSFILE");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_password_in_cvsroot_is_verified_without_asking() {
+        let _env = lock_env();
+        let dir = scratch("login-embedded");
+        let pass_path = dir.join(".cvspass");
+        std::env::set_var("CVS_PASSFILE", &pass_path);
+
+        let scrambled = String::from_utf8(passfile::scramble(b"secret")).unwrap();
+        let (root, server, done) = login_server_with(
+            "BEGIN VERIFICATION REQUEST",
+            scrambled.clone(),
+            "I LOVE YOU\n",
+        );
+        let root_with_password = root.replacen(":pserver:ann@", ":pserver:ann:secret@", 1);
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: dir.clone(),
+                args: vec!["-d".to_string(), root_with_password, "login".to_string()],
+                password: None,
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            done.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "login did not contact the server"
+        );
+        server.join().unwrap();
+        let canonical = passfile::canonical(&root::Root::parse(&root).unwrap());
+        assert_eq!(
+            std::fs::read(&pass_path).unwrap(),
+            format!("/1 {} {}\n", canonical, scrambled).into_bytes()
+        );
+        assert!(
+            sink.lines.iter().all(|(_, line)| !line.contains("secret")),
+            "the password must not be shown"
+        );
+
+        std::env::remove_var("CVS_PASSFILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn login_with_no_execute_verifies_but_writes_nothing() {
+        let _env = lock_env();
+        let dir = scratch("login-noexec");
+        let pass_path = dir.join(".cvspass");
+        std::env::set_var("CVS_PASSFILE", &pass_path);
+
+        let scrambled = String::from_utf8(passfile::scramble(b"secret")).unwrap();
+        let (root, server, done) = login_server(scrambled, "I LOVE YOU\n");
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: dir.clone(),
+                args: vec![
+                    "-n".to_string(),
+                    "-d".to_string(),
+                    root,
+                    "login".to_string(),
+                ],
+                password: Some("secret".to_string()),
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(done.recv_timeout(Duration::from_secs(5)).is_ok());
+        server.join().unwrap();
+        assert!(!pass_path.exists(), "-n must not write the passfile");
+
+        std::env::remove_var("CVS_PASSFILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn e_lines_are_shown_and_the_verification_continues() {
+        let _env = lock_env();
+        let dir = scratch("login-e-lines");
+        let pass_path = dir.join(".cvspass");
+        std::env::set_var("CVS_PASSFILE", &pass_path);
+
+        let scrambled = String::from_utf8(passfile::scramble(b"secret")).unwrap();
+        let (root, server, done) =
+            login_server(scrambled, "E first note\nE second note\nI LOVE YOU\n");
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: dir.clone(),
+                args: vec!["-d".to_string(), root, "login".to_string()],
+                password: Some("secret".to_string()),
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(done.recv_timeout(Duration::from_secs(5)).is_ok());
+        server.join().unwrap();
+        assert!(sink
+            .lines
+            .contains(&(Channel::Err, "first note".to_string())));
+        assert!(sink
+            .lines
+            .contains(&(Channel::Err, "second note".to_string())));
+        assert!(pass_path.exists(), "a successful login must be saved");
+
+        std::env::remove_var("CVS_PASSFILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_error_line_is_shown_and_the_login_fails() {
+        let _env = lock_env();
+        let dir = scratch("login-error-line");
+        let pass_path = dir.join(".cvspass");
+        std::env::set_var("CVS_PASSFILE", &pass_path);
+
+        let scrambled = String::from_utf8(passfile::scramble(b"secret")).unwrap();
+        let (root, server, done) = login_server(scrambled, "error 0 no such repository\n");
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: dir.clone(),
+                args: vec!["-d".to_string(), root, "login".to_string()],
+                password: Some("secret".to_string()),
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+
+        assert_eq!(code, 1);
+        assert!(done.recv_timeout(Duration::from_secs(5)).is_ok());
+        server.join().unwrap();
+        assert_eq!(
+            sink.lines.last(),
+            Some(&(Channel::Err, "no such repository".to_string()))
+        );
+        assert!(!pass_path.exists(), "a failed login must not be saved");
+
+        std::env::remove_var("CVS_PASSFILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn logout_removes_the_canonical_entry_without_connecting() {
+        let _env = lock_env();
+        let dir = scratch("logout");
+        let pass_path = dir.join(".cvspass");
+        std::env::set_var("CVS_PASSFILE", &pass_path);
+
+        let canonical = ":pserver:ann@localhost:1/repo";
+        let scrambled = String::from_utf8(passfile::scramble(b"secret")).unwrap();
+        let other = "/1 :pserver:other@host:2401/repo A\n";
+        std::fs::write(
+            &pass_path,
+            format!("/1 {} {}\n{}", canonical, scrambled, other),
+        )
+        .unwrap();
+
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: dir.clone(),
+                args: vec![
+                    "-d".to_string(),
+                    ":pserver:ann@LOCALHOST:1:/repo/".to_string(),
+                    "logout".to_string(),
+                ],
+                password: None,
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read(&pass_path).unwrap(), other.as_bytes());
+        assert_eq!(
+            sink.lines,
+            vec![(Channel::Out, format!("Logging out of {}", canonical))]
+        );
+
+        std::env::remove_var("CVS_PASSFILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn logout_with_no_execute_and_quiet_changes_nothing() {
+        let _env = lock_env();
+        let dir = scratch("logout-noexec");
+        let pass_path = dir.join(".cvspass");
+        std::env::set_var("CVS_PASSFILE", &pass_path);
+
+        let canonical = ":pserver:ann@host:2401/repo";
+        let scrambled = String::from_utf8(passfile::scramble(b"secret")).unwrap();
+        let line = format!("/1 {} {}\n", canonical, scrambled);
+        std::fs::write(&pass_path, &line).unwrap();
+
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: dir.clone(),
+                args: vec![
+                    "-n".to_string(),
+                    "-q".to_string(),
+                    "-d".to_string(),
+                    ":pserver:ann@host:/repo".to_string(),
+                    "logout".to_string(),
+                ],
+                password: None,
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read(&pass_path).unwrap(), line.into_bytes());
+        assert!(sink.lines.is_empty(), "-q says nothing");
+
+        std::env::remove_var("CVS_PASSFILE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn login_and_logout_refuse_other_methods_with_the_two_official_errors() {
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: PathBuf::from("."),
+                args: vec![
+                    "-d".to_string(),
+                    ":ext:host:/repo".to_string(),
+                    "login".to_string(),
+                ],
+                password: None,
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(
+            sink.lines,
+            vec![
+                (
+                    Channel::Err,
+                    "cvs login: can only use `login' command with the 'pserver' method".to_string()
+                ),
+                (
+                    Channel::Err,
+                    "cvs [login aborted]: CVSROOT: :ext:host:/repo".to_string()
+                ),
+            ]
+        );
+
+        let mut sink = RecordingSink::default();
+        let code = run(
+            Request {
+                cwd: PathBuf::from("."),
+                args: vec![
+                    "-d".to_string(),
+                    ":ext:host:/repo".to_string(),
+                    "logout".to_string(),
+                ],
+                password: None,
+            },
+            &mut sink,
+            &CancelToken::default(),
+        )
+        .unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(
+            sink.lines,
+            vec![
+                (
+                    Channel::Err,
+                    "cvs logout: can only use pserver method with `logout' command".to_string()
+                ),
+                (
+                    Channel::Err,
+                    "cvs [logout aborted]: CVSROOT: :ext:host:/repo".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

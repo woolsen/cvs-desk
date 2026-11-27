@@ -2,12 +2,20 @@
 //!
 //! The subcommand comes first, before every option: `watch on -l file`, never
 //! `watch -l on file`. `on` and `off` carry no action of their own; `add` and `remove` name
-//! one action per `-a`, and a command with no `-a` watches all three, exactly as the
-//! reference does.
+//! actions with `-a`, and a command with no `-a` watches all three.
+//!
+//! `-a` is a set of flags, not a list: `all` sets all three, `none` clears the ones named so
+//! far, and repeated flags collapse. The request always sends them in the reference's fixed
+//! order `edit`, `unedit`, `commit`; when none is set it sends a single `-a none`
+//! (`watch.c:322-329`).
 //!
 //! The files are sent as the `status` blocks: one `Directory`/`Entry`/state group per folder,
 //! then the names as `Argument`s, then the request. `-l` goes to the server as an `Argument`;
-//! `-R` is the default and stays on the client.
+//! `-R` is the default and stays on the client. `Argument --` ends the options on the wire
+//! before any folder block (`watch.c:330`, `edit.c:103`).
+//!
+//! There is no `nochange` response and no `.cvswatch` file: 1.11.23 keeps watch state in the
+//! repository's `CVS/fileattr`, and neither token exists in its sources.
 
 use std::path::Path;
 
@@ -28,6 +36,58 @@ pub(crate) fn action_letters(action: &str) -> Option<&'static str> {
         "all" => Some("EUC"),
         "none" => Some(""),
         _ => None,
+    }
+}
+
+#[derive(Debug, Default)]
+struct Actions {
+    edit: bool,
+    unedit: bool,
+    commit: bool,
+    /// At least one `-a` was named; without one the reference watches all three.
+    named: bool,
+}
+
+impl Actions {
+    fn set_all(&mut self) {
+        self.edit = true;
+        self.unedit = true;
+        self.commit = true;
+    }
+
+    fn apply(&mut self, action: &str) {
+        self.named = true;
+        match action {
+            "edit" => self.edit = true,
+            "unedit" => self.unedit = true,
+            "commit" => self.commit = true,
+            "all" => self.set_all(),
+            "none" => {
+                self.edit = false;
+                self.unedit = false;
+                self.commit = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// The `-a` values in the reference's fixed order, or `none` when every flag is clear
+    /// (`watch.c:322-329`).
+    fn wire(&self) -> Vec<&'static str> {
+        let mut out = Vec::with_capacity(3);
+        if self.edit {
+            out.push("edit");
+        }
+        if self.unedit {
+            out.push("unedit");
+        }
+        if self.commit {
+            out.push("commit");
+        }
+        if out.is_empty() {
+            out.push("none");
+        }
+        out
     }
 }
 
@@ -79,7 +139,7 @@ impl Subcommand {
 struct Options {
     sub: Subcommand,
     recursive: bool,
-    actions: Vec<String>,
+    actions: Actions,
     names: Vec<String>,
 }
 
@@ -90,6 +150,9 @@ enum Parsed {
     Usage(Option<String>),
 }
 
+/// The reference's `getopt ("+lRa:")` for add/remove and `getopt ("+lR")` for on/off
+/// (`watch.c:263`, `edit.c:75`): options stop at the first name, short options cluster
+/// (`-lR`), and a value ends its cluster (`-aedit`) or is the next argument (`-a edit`).
 fn parse_args(args: &[String]) -> Parsed {
     let Some(first) = args.first() else {
         return Parsed::Usage(None);
@@ -100,7 +163,7 @@ fn parse_args(args: &[String]) -> Parsed {
     let mut opts = Options {
         sub,
         recursive: true,
-        actions: Vec::new(),
+        actions: Actions::default(),
         names: Vec::new(),
     };
     let mut i = 1;
@@ -114,38 +177,54 @@ fn parse_args(args: &[String]) -> Parsed {
             opts.names.extend(args[i..].iter().cloned());
             break;
         }
-        match arg.as_str() {
-            "-l" => opts.recursive = false,
-            "-R" => opts.recursive = true,
-            "-a" if sub.takes_actions() => {
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    return Parsed::Usage(Some(format!(
-                        "{}: option requires an argument -- a",
-                        sub.name()
-                    )));
-                };
-                if action_letters(value).is_none() {
-                    return Parsed::Usage(None);
+        let cluster: Vec<char> = arg[1..].chars().collect();
+        let mut j = 0;
+        while j < cluster.len() {
+            match cluster[j] {
+                'l' => {
+                    opts.recursive = false;
+                    j += 1;
                 }
-                opts.actions.push(value.clone());
-            }
-            other => {
-                return Parsed::Usage(Some(format!(
-                    "{}: invalid option -- {}",
-                    sub.name(),
-                    other.trim_start_matches('-')
-                )))
+                'R' => {
+                    opts.recursive = true;
+                    j += 1;
+                }
+                'a' if sub.takes_actions() => {
+                    // The value is the rest of the cluster (`-aedit`) or the next argument.
+                    let value: String = if j + 1 < cluster.len() {
+                        cluster[j + 1..].iter().collect()
+                    } else {
+                        i += 1;
+                        match args.get(i) {
+                            Some(value) => value.clone(),
+                            None => {
+                                return Parsed::Usage(Some(format!(
+                                    "{}: option requires an argument -- a",
+                                    sub.name()
+                                )))
+                            }
+                        }
+                    };
+                    if action_letters(&value).is_none() {
+                        return Parsed::Usage(None);
+                    }
+                    opts.actions.apply(&value);
+                    j = cluster.len();
+                }
+                other => {
+                    return Parsed::Usage(Some(format!(
+                        "{}: invalid option -- {}",
+                        sub.name(),
+                        other
+                    )))
+                }
             }
         }
         i += 1;
     }
-    if opts.actions.is_empty() && sub.takes_actions() {
-        // The reference watches every action when no `-a` is named.
-        opts.actions = ["edit", "unedit", "commit"]
-            .iter()
-            .map(|action| action.to_string())
-            .collect();
+    if sub.takes_actions() && !opts.actions.named {
+        // The reference watches every action when no `-a` is named (`watch.c:305-310`).
+        opts.actions.set_all();
     }
     Parsed::Options(opts)
 }
@@ -182,14 +261,21 @@ pub fn run(
         return Err(Error::aborted("watch", "no files to watch"));
     }
 
+    // Watch changes only the repository's file attributes. There is no local write for `-n`
+    // to suppress; the request still goes out, and `Session::start` has already sent
+    // `Global_option -n` so the server leaves its own disk alone.
     let mut session = protocol::open(root, "watch", cancel, sink)?;
     if !opts.recursive {
         session.argument("-l")?;
     }
-    for action in &opts.actions {
-        session.argument("-a")?;
-        session.argument(action)?;
+    if opts.sub.takes_actions() {
+        for action in opts.actions.wire() {
+            session.argument("-a")?;
+            session.argument(action)?;
+        }
     }
+    // `Argument --` and `Max-dotdot` must precede every folder block (`watch.c:330`).
+    targets::begin_files(&mut session, &opts.names)?;
     let last = targets::send_blocks_watch(&mut session, &targets)?;
     targets::finish_from_last(
         &mut session,
@@ -236,11 +322,14 @@ mod tests {
     fn on_and_off_take_no_actions() {
         let line = usage(&["on", "-a", "commit", "a.txt"]).expect("a complaint first");
         assert!(line.starts_with("on: invalid option -- a"), "{}", line);
+
+        let line = usage(&["off", "-aedit", "a.txt"]).expect("a complaint first");
+        assert!(line.starts_with("off: invalid option -- a"), "{}", line);
     }
 
     #[test]
     fn a_missing_action_value_complains_before_the_usage() {
-        let line = usage(&["add", "-a"]).expect("a complaint first");
+        let line = usage(&["add", "-la"]).expect("a complaint first");
         assert!(
             line.contains("option requires an argument -- a"),
             "{}",
@@ -255,18 +344,61 @@ mod tests {
     }
 
     #[test]
+    fn short_options_may_be_clustered() {
+        let opts = options(&["on", "-lR", "a.txt"]);
+        assert!(opts.recursive, "-R after -l turns recursion back on");
+        assert_eq!(opts.names, vec!["a.txt"]);
+
+        let opts = options(&["add", "-aedit", "a.txt"]);
+        assert_eq!(opts.actions.wire(), vec!["edit"]);
+
+        let opts = options(&["remove", "-lRa", "unedit", "a.txt"]);
+        assert!(opts.recursive);
+        assert_eq!(opts.actions.wire(), vec!["unedit"]);
+    }
+
+    #[test]
+    fn a_value_ends_its_cluster() {
+        let opts = options(&["add", "-aedit", "-l", "a.txt"]);
+        assert!(!opts.recursive);
+        assert_eq!(opts.actions.wire(), vec!["edit"]);
+    }
+
+    #[test]
     fn add_without_an_action_watches_all_three() {
         let opts = options(&["add", "a.txt"]);
-        assert_eq!(opts.actions, vec!["edit", "unedit", "commit"]);
+        assert_eq!(opts.actions.wire(), vec!["edit", "unedit", "commit"]);
         assert!(opts.recursive);
     }
 
     #[test]
-    fn repeated_actions_keep_their_order_and_r_undoes_l() {
-        let opts = options(&["remove", "-l", "-R", "-a", "unedit", "-a", "edit", "a.txt"]);
-        assert_eq!(opts.actions, vec!["unedit", "edit"]);
-        assert!(opts.recursive);
-        assert_eq!(opts.names, vec!["a.txt"]);
+    fn actions_keep_the_fixed_e_u_c_order() {
+        let opts = options(&["remove", "-a", "commit", "-a", "edit", "a.txt"]);
+        assert_eq!(opts.actions.wire(), vec!["edit", "commit"]);
+    }
+
+    #[test]
+    fn all_expands_and_none_clears_what_was_named() {
+        let opts = options(&["add", "-a", "all", "a.txt"]);
+        assert_eq!(opts.actions.wire(), vec!["edit", "unedit", "commit"]);
+
+        let opts = options(&["add", "-a", "all", "-a", "none", "a.txt"]);
+        assert_eq!(opts.actions.wire(), vec!["none"]);
+
+        let opts = options(&["add", "-a", "edit", "-a", "none", "-a", "unedit", "a.txt"]);
+        assert_eq!(opts.actions.wire(), vec!["unedit"]);
+    }
+
+    #[test]
+    fn an_explicit_none_is_sent_even_without_other_actions() {
+        let opts = options(&["add", "-a", "none", "a.txt"]);
+        assert_eq!(opts.actions.wire(), vec!["none"]);
+    }
+
+    #[test]
+    fn repeated_actions_collapse_into_one_flag() {
+        let opts = options(&["add", "-a", "edit", "-a", "edit", "a.txt"]);
+        assert_eq!(opts.actions.wire(), vec!["edit"]);
     }
 
     #[test]
@@ -274,7 +406,10 @@ mod tests {
         let opts = options(&["on"]);
         assert!(opts.sub == Subcommand::On);
         assert!(opts.recursive);
-        assert!(opts.actions.is_empty(), "on carries no action");
+        assert!(
+            !opts.actions.edit && !opts.actions.unedit && !opts.actions.commit,
+            "on carries no action"
+        );
         assert!(opts.names.is_empty());
     }
 
@@ -282,5 +417,19 @@ mod tests {
     fn a_double_dash_ends_the_options() {
         let opts = options(&["add", "--", "-a"]);
         assert_eq!(opts.names, vec!["-a"]);
+
+        let opts = options(&["on", "--", "-l"]);
+        assert!(opts.recursive);
+        assert_eq!(opts.names, vec!["-l"]);
+    }
+
+    #[test]
+    fn a_name_ends_the_options() {
+        let opts = options(&["add", "a.txt", "-l"]);
+        assert!(opts.recursive);
+        assert_eq!(opts.names, vec!["a.txt", "-l"]);
+
+        let opts = options(&["on", "-", "a.txt"]);
+        assert_eq!(opts.names, vec!["-", "a.txt"]);
     }
 }

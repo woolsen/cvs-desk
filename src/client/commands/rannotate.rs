@@ -15,6 +15,8 @@ struct Options {
     /// True after `-l` and false after `-R`; recursion is on by default.
     local: bool,
     force: bool,
+    /// `-F`: annotate binary files instead of skipping them.
+    force_binary: bool,
     revision: Option<String>,
     date: Option<String>,
     names: Vec<String>,
@@ -33,6 +35,22 @@ fn parse_args(args: &[String]) -> Result<Options> {
             "-l" => opts.local = true,
             "-R" => opts.local = false,
             "-f" => opts.force = true,
+            "-F" => opts.force_binary = true,
+            other
+                if other.starts_with('-')
+                    && other.len() > 2
+                    && other[1..].chars().all(|c| "lRfF".contains(c)) =>
+            {
+                for c in other[1..].chars() {
+                    match c {
+                        'l' => opts.local = true,
+                        'R' => opts.local = false,
+                        'f' => opts.force = true,
+                        'F' => opts.force_binary = true,
+                        _ => {}
+                    }
+                }
+            }
             "-r" | "-D" => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| {
@@ -74,6 +92,9 @@ pub fn run(root: Root, args: &[String], cancel: &CancelToken, sink: &mut dyn Sin
     if opts.force {
         session.argument("-f")?;
     }
+    if opts.force_binary {
+        session.argument("-F")?;
+    }
     if let Some(revision) = &opts.revision {
         session.argument("-r")?;
         session.argument(revision)?;
@@ -82,6 +103,9 @@ pub fn run(root: Root, args: &[String], cancel: &CancelToken, sink: &mut dyn Sin
         session.argument("-D")?;
         session.argument(&date::normalize(date))?;
     }
+    // The reference marks the end of the options before the module names
+    // (annotate.c:112-118).
+    session.argument("--")?;
     for name in &opts.names {
         session.argument(name)?;
     }
