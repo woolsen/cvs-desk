@@ -4,7 +4,7 @@
 //! file's contents, which is what lets the file list show names that are not checked out.
 //! Directories are announced by the server's own `cvs rlog: Logging <path>` lines.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::entries::{Origin, Row, State};
 
@@ -15,59 +15,96 @@ pub struct Listing {
     pub files: Vec<String>,
 }
 
+/// One direct child the parser has not reported before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// Reads the `rlog -R` lines one at a time and reports each direct child the first time
+/// it appears. [`finish`](Self::finish) returns the same listing [`parse`] would.
+pub struct Parser {
+    requested: String,
+    root: String,
+    dirs: BTreeSet<String>,
+    files: BTreeSet<String>,
+    seen: HashSet<String>,
+}
+
+impl Parser {
+    pub fn new(requested: &str, root_path: &str) -> Self {
+        Self {
+            requested: clean(requested),
+            root: clean(root_path),
+            dirs: BTreeSet::new(),
+            files: BTreeSet::new(),
+            seen: HashSet::new(),
+        }
+    }
+
+    /// Feed one line. Returns the name only when this line is the first to show it.
+    pub fn push(&mut self, raw: &str) -> Option<Found> {
+        let line = raw.trim_end_matches('\r').trim();
+        if let Some(path) = line.strip_prefix("cvs rlog: Logging ") {
+            let relative = relative_to(path, &self.requested, &self.root)?;
+            if relative.is_empty() {
+                return None;
+            }
+            let first = relative.split('/').next()?;
+            if first.is_empty() || first == "CVS" {
+                return None;
+            }
+            return self.remember(first, true);
+        }
+
+        let path = line.strip_suffix(",v")?;
+        let relative = relative_to(path, &self.requested, &self.root)?;
+        if relative.is_empty()
+            || relative.split('/').any(|part| part == "Attic")
+            || relative.starts_with('.')
+            // A file below a child folder is not part of this folder's own list. The child
+            // folder is shown, and opening it runs its own `rlog`.
+            || relative.contains('/')
+        {
+            return None;
+        }
+        self.remember(&relative, false)
+    }
+
+    fn remember(&mut self, name: &str, is_dir: bool) -> Option<Found> {
+        if !self.seen.insert(name.to_lowercase()) {
+            return None;
+        }
+        let name = name.to_string();
+        if is_dir {
+            self.dirs.insert(name.clone());
+        } else {
+            self.files.insert(name.clone());
+        }
+        Some(Found { name, is_dir })
+    }
+
+    /// The complete listing seen so far.
+    pub fn finish(self) -> Listing {
+        Listing {
+            dirs: self.dirs.into_iter().collect(),
+            files: self.files.into_iter().collect(),
+        }
+    }
+}
+
 /// Read the output of `cvs rlog -R <requested>`.
 ///
 /// `root_path` is the path part of `CVS/Root`; server file names are absolute and start
 /// with it. When a server reports a different prefix (a chroot or a proxy), the requested
 /// folder is used as the fallback anchor.
 pub fn parse(lines: &[String], requested: &str, root_path: &str) -> Listing {
-    let requested = clean(requested);
-    let root = clean(root_path);
-    let mut dirs = BTreeSet::new();
-    let mut files = BTreeSet::new();
-
-    for raw in lines {
-        let line = raw.trim_end_matches('\r').trim();
-        if let Some(path) = line.strip_prefix("cvs rlog: Logging ") {
-            let relative = match relative_to(path, &requested, &root) {
-                Some(relative) => relative,
-                None => continue,
-            };
-            if relative.is_empty() {
-                continue;
-            }
-            if let Some(first) = relative.split('/').next() {
-                if !first.is_empty() && first != "CVS" {
-                    dirs.insert(first.to_string());
-                }
-            }
-            continue;
-        }
-
-        let Some(path) = line.strip_suffix(",v") else {
-            continue;
-        };
-        let Some(relative) = relative_to(path, &requested, &root) else {
-            continue;
-        };
-        if relative.is_empty()
-            || relative.split('/').any(|part| part == "Attic")
-            || relative.starts_with('.')
-        {
-            continue;
-        }
-        // A file below a child folder is not part of this folder's own list. The child
-        // folder is shown, and opening it runs its own `rlog`.
-        if relative.contains('/') {
-            continue;
-        }
-        files.insert(relative);
+    let mut parser = Parser::new(requested, root_path);
+    for line in lines {
+        parser.push(line);
     }
-
-    Listing {
-        dirs: dirs.into_iter().collect(),
-        files: files.into_iter().collect(),
-    }
+    parser.finish()
 }
 
 /// Merge a repository listing into the rows read from disk.
@@ -80,20 +117,34 @@ pub fn merge_rows(local: Vec<Row>, listing: &Listing) -> Vec<Row> {
         .into_iter()
         .filter(|row| row.origin == Origin::Local)
         .collect();
-    let mut known: std::collections::HashSet<String> =
-        rows.iter().map(|row| row.name.to_lowercase()).collect();
-
-    for name in &listing.files {
-        if known.insert(name.to_lowercase()) {
-            rows.push(remote_row(name, false));
-        }
-    }
-    for name in &listing.dirs {
-        if known.insert(name.to_lowercase()) {
-            rows.push(remote_row(name, true));
-        }
-    }
+    let found: Vec<Found> = listing
+        .files
+        .iter()
+        .map(|name| Found {
+            name: name.clone(),
+            is_dir: false,
+        })
+        .chain(listing.dirs.iter().map(|name| Found {
+            name: name.clone(),
+            is_dir: true,
+        }))
+        .collect();
+    add_new_rows(&mut rows, &found);
     rows
+}
+
+/// Add names the list does not already know. Local rows win: a name that is present in
+/// any case is not offered twice. Returns how many rows were added.
+pub fn add_new_rows(rows: &mut Vec<Row>, found: &[Found]) -> usize {
+    let mut known: HashSet<String> = rows.iter().map(|row| row.name.to_lowercase()).collect();
+    let mut added = 0;
+    for name in found {
+        if known.insert(name.name.to_lowercase()) {
+            rows.push(remote_row(&name.name, name.is_dir));
+            added += 1;
+        }
+    }
+    added
 }
 
 fn remote_row(name: &str, is_dir: bool) -> Row {
@@ -308,5 +359,77 @@ mod tests {
         let lines = vec!["cvs rlog: cannot find module `Develop/Design' - ignored".to_string()];
         assert!(error_line(&lines).is_some());
         assert!(error_line(&["cvs rlog: Logging Develop".to_string()]).is_none());
+    }
+
+    #[test]
+    fn a_parser_reports_each_new_name_once_as_it_arrives() {
+        let mut parser = Parser::new("Develop/Design", "/srv/cvs/project");
+        let lines = [
+            "cvs rlog: Logging Develop/Design",
+            "/srv/cvs/project/Develop/Design/a.txt,v",
+            "/srv/cvs/project/Develop/Design/a.txt,v",
+            "cvs rlog: Logging Develop/Design/HLD",
+            "/srv/cvs/project/Develop/Design/HLD/doc.txt,v",
+            "cvs rlog: Logging Develop/Design/HLD",
+            "/srv/cvs/project/Develop/Design/b.txt,v",
+        ];
+        let found: Vec<(String, bool)> = lines
+            .iter()
+            .filter_map(|line| parser.push(line).map(|name| (name.name, name.is_dir)))
+            .collect();
+
+        assert_eq!(
+            found,
+            vec![
+                ("a.txt".to_string(), false),
+                ("HLD".to_string(), true),
+                ("b.txt".to_string(), false),
+            ]
+        );
+        let listing = parser.finish();
+        assert_eq!(listing.files, vec!["a.txt", "b.txt"]);
+        assert_eq!(listing.dirs, vec!["HLD"]);
+    }
+
+    #[test]
+    fn a_parser_skips_the_requested_folder_attic_and_dot_names() {
+        let mut parser = Parser::new("Develop/Design", "/srv/cvs/project");
+        for line in [
+            "cvs rlog: Logging Develop/Design",
+            "/srv/cvs/project/Develop/Design/Attic/gone.txt,v",
+            "/srv/cvs/project/Develop/Design/.cvsignore,v",
+        ] {
+            assert!(parser.push(line).is_none(), "{line}");
+        }
+        assert_eq!(parser.finish(), Listing::default());
+    }
+
+    #[test]
+    fn names_found_by_the_parser_can_be_added_to_rows_as_they_arrive() {
+        let mut rows = vec![row("local.txt", false)];
+        let found = vec![
+            Found {
+                name: "local.txt".to_string(),
+                is_dir: false,
+            },
+            Found {
+                name: "server.txt".to_string(),
+                is_dir: false,
+            },
+            Found {
+                name: "more".to_string(),
+                is_dir: true,
+            },
+        ];
+
+        let added = add_new_rows(&mut rows, &found);
+
+        assert_eq!(added, 2);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].name, "server.txt");
+        assert_eq!(rows[1].origin, Origin::Remote);
+        assert_eq!(rows[1].state, State::Remote);
+        assert!(rows[2].is_dir);
+        assert_eq!(rows[2].origin, Origin::Remote);
     }
 }
