@@ -68,6 +68,9 @@ pub(crate) struct HistoryState {
     branch_filter: BranchFilter,
     diff_target: Target,
     diff_open: bool,
+    /// Bring the floating diff window forward once, when it opens. It must not stay
+    /// in front: the user clicks revisions in the history window beside it.
+    diff_focus: bool,
     diff_model: Option<DiffModel>,
     diff_view: DiffView,
     diff_generation: u64,
@@ -169,6 +172,7 @@ impl HistoryState {
             branch_filter: BranchFilter::All,
             diff_target: Target::Previous,
             diff_open: false,
+            diff_focus: false,
             diff_model: None,
             diff_view: DiffView::new(),
             diff_generation: 0,
@@ -342,6 +346,7 @@ impl HistoryState {
         }
         self.diff_open = open;
         if open {
+            self.diff_focus = true;
             if !self.demo {
                 self.loader = None;
                 self.diff_model = None;
@@ -557,13 +562,26 @@ pub(super) fn show(
     action
 }
 
+fn diff_window_id() -> egui::Id {
+    egui::Id::unique("file_history_diff_window")
+}
+
 /// The floating diff window. It sits beside the history window rather than in it, so
 /// the user can keep clicking revisions and watch the diff follow the selection.
 fn diff_window(ctx: &egui::Context, state: &mut HistoryState) {
+    // The first frame is foreground so a newly opened diff is never hidden behind
+    // the history window. Afterwards it returns to the normal layer, where clicking
+    // the history window can bring that window forward again.
+    let order = if state.diff_focus {
+        egui::Order::Foreground
+    } else {
+        egui::Order::Middle
+    };
     let mut open = true;
     egui::Window::new(format!("Diff — {}", state.file))
-        .id(egui::Id::unique("file_history_diff_window"))
+        .id(diff_window_id())
         .open(&mut open)
+        .order(order)
         .collapsible(false)
         .resizable(true)
         .default_width(1100.0)
@@ -571,6 +589,7 @@ fn diff_window(ctx: &egui::Context, state: &mut HistoryState) {
         .min_width(640.0)
         .min_height(320.0)
         .show(ctx, |ui| diff(ui, state));
+    state.diff_focus = false;
 
     if !open {
         state.set_diff_open(false);
@@ -1148,19 +1167,6 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
         }
         if !state.diff_error.is_empty() {
             ui.colored_label(DEAD, &state.diff_error);
-        }
-        if let Some(index) = state.selected {
-            if let Some(node) = state.history.revisions.get(index) {
-                let range = match state.diff_target {
-                    Target::Previous => state
-                        .history
-                        .previous_revision(index)
-                        .map(|previous| format!("{} → {}", previous, node.revision))
-                        .unwrap_or_else(|| format!("initial → {}", node.revision)),
-                    Target::Working => format!("{} → local file", node.revision),
-                };
-                ui.label(egui::RichText::new(range).small().color(MUTED));
-            }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.small_button("Reload").clicked() {

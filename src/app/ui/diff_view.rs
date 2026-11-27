@@ -230,7 +230,7 @@ impl DiffView {
             if !model.hunks.is_empty() {
                 ui.separator();
                 if ui
-                    .small_button("◀")
+                    .small_button("Prev")
                     .on_hover_text("Previous change")
                     .clicked()
                 {
@@ -240,17 +240,25 @@ impl DiffView {
                         .map_or(model.hunks.len() - 1, |index| index.saturating_sub(1));
                     target = Some(model.hunks[current].first_row);
                 }
-                if ui.small_button("▶").on_hover_text("Next change").clicked() {
+                if ui
+                    .small_button("Next")
+                    .on_hover_text("Next change")
+                    .clicked()
+                {
                     let current = self
                         .selected
                         .and_then(|row| hunk_at(model, row))
                         .map_or(0, |index| (index + 1).min(model.hunks.len() - 1));
                     target = Some(model.hunks[current].first_row);
                 }
+                let changes = model.hunks.len();
                 ui.label(
-                    egui::RichText::new(format!("{} changes", model.hunks.len()))
-                        .small()
-                        .color(GUTTER_TEXT),
+                    egui::RichText::new(format!(
+                        "{changes} change{}",
+                        if changes == 1 { "" } else { "s" }
+                    ))
+                    .small()
+                    .color(GUTTER_TEXT),
                 );
             }
 
@@ -790,6 +798,43 @@ mod tests {
         // The component owns no raw mode; drawing a model must never mutate it.
         let model = model("a\n", "b\n");
         assert_eq!(model.rows.len(), 1);
+    }
+
+    #[test]
+    fn the_widget_marks_a_missing_final_newline() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let model = model("a\nb", "a\nb\n");
+        let mut view = DiffView::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, 420.0),
+        ));
+        let output = crate::app::ui::test_run(&ctx, input, |ui| {
+            view.show(ui, &model, 1);
+        });
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_string()),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "\\ No newline at end of file"),
+            "the view hid the missing final newline: {texts:?}"
+        );
     }
 
     #[test]
