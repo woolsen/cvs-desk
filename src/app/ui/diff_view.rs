@@ -47,9 +47,17 @@ const TRACK: Color32 = Color32::from_rgb(0xF1, 0xF1, 0xF1);
 const THUMB: Color32 = Color32::from_rgb(0xC9, 0xC9, 0xC9);
 const OVERVIEW_THUMB: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 18);
 const OVERVIEW_THUMB_BORDER: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 32);
-const ADD_MARK: Color32 = Color32::from_rgb(0x59, 0xA8, 0x69);
-const MOD_MARK: Color32 = Color32::from_rgb(0x38, 0x9F, 0xD6);
-const DEL_MARK: Color32 = Color32::from_rgb(0xD7, 0x54, 0x52);
+/// A change mark keeps its hue but lets the lane behind it show through. egui stores
+/// colours premultiplied, so the alpha is folded into each channel.
+const fn mark(r: u8, g: u8, b: u8, alpha: u8) -> Color32 {
+    const fn scaled(channel: u8, alpha: u8) -> u8 {
+        ((channel as u16 * alpha as u16 + 127) / 255) as u8
+    }
+    Color32::from_rgba_premultiplied(scaled(r, alpha), scaled(g, alpha), scaled(b, alpha), alpha)
+}
+const ADD_MARK: Color32 = mark(0x59, 0xA8, 0x69, 0x8C);
+const MOD_MARK: Color32 = mark(0x38, 0x9F, 0xD6, 0x8C);
+const DEL_MARK: Color32 = mark(0xD7, 0x54, 0x52, 0x8C);
 const DIFF_COUNT: Color32 = Color32::from_rgb(0x16, 0x7A, 0xD1);
 const NOTICE: Color32 = Color32::from_rgb(0x9A, 0x65, 0x00);
 const NOTICE_BAD: Color32 = Color32::from_rgb(0xA5, 0x0E, 0x0E);
@@ -333,7 +341,7 @@ impl DiffView {
 
         if overview_w > 0.0 {
             if let Some(view) = viewport {
-                self.overview(&mut body, model, body_rect, code_h, row_h, view);
+                self.overview(&mut body, model, body_rect, row_h, view);
             }
         }
     }
@@ -633,13 +641,14 @@ impl DiffView {
         ui: &mut egui::Ui,
         model: &DiffModel,
         body_rect: Rect,
-        height: f32,
         row_h: f32,
         viewport: Rect,
     ) {
+        // The lane runs the full height of the body, so it reaches the bottom edge
+        // beside the horizontal scrollbar instead of stopping above it.
         let lane = Rect::from_min_size(
             egui::pos2(body_rect.right() - OVERVIEW_W, body_rect.top()),
-            egui::vec2(OVERVIEW_W, height),
+            egui::vec2(OVERVIEW_W, body_rect.height()),
         );
         ui.painter().line_segment(
             [
@@ -662,10 +671,10 @@ impl DiffView {
             egui::pos2(lane.left() + 2.0, thumb_top),
             egui::pos2(lane.right() - 2.0, (thumb_bottom).max(thumb_top + 8.0)),
         );
-        ui.painter().rect_filled(thumb, 3.0, OVERVIEW_THUMB);
+        ui.painter().rect_filled(thumb, 0.0, OVERVIEW_THUMB);
         ui.painter().rect_stroke(
             thumb,
-            3.0,
+            0.0,
             Stroke::new(1.0, OVERVIEW_THUMB_BORDER),
             egui::StrokeKind::Inside,
         );
@@ -675,7 +684,7 @@ impl DiffView {
                 egui::pos2(lane.left() + 3.0, lane.top() + y),
                 egui::vec2((lane.width() - 6.0).max(1.0), h),
             );
-            ui.painter().rect_filled(mark, 2.0, kind.color());
+            ui.painter().rect_filled(mark, 0.0, kind.color());
         }
 
         let response = ui.interact(
@@ -1894,5 +1903,109 @@ mod tests {
                 _ => None,
             });
         assert_eq!(copied, Some("alpha\nbeta"));
+    }
+
+    #[test]
+    fn the_overview_lane_reaches_the_bottom_of_the_diff() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let model = model("a\nb\nc\n", "a\nB\nc\n");
+        let mut view = DiffView::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, 420.0),
+        ));
+        let output = crate::app::ui::test_run(&ctx, input, |ui| {
+            view.show(ui, &model, 1);
+        });
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<[egui::Pos2; 2]>) {
+            match shape {
+                egui::Shape::LineSegment { points, .. } => out.push(*points),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut vertical = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut vertical);
+        }
+        let lane = vertical
+            .iter()
+            .filter(|points| points[0].x == points[1].x)
+            .max_by(|a, b| a[0].x.total_cmp(&b[0].x))
+            .expect("the overview lane has no divider");
+        assert!(
+            lane[0].x > 880.0,
+            "the rightmost vertical line is not the overview lane: {lane:?}"
+        );
+        assert!(
+            lane[0].y.max(lane[1].y) >= 419.0,
+            "the overview lane stops short of the bottom: {lane:?}"
+        );
+    }
+
+    #[test]
+    fn the_overview_marks_are_translucent_and_square() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let model = model("a\nb\nc\n", "A\nb\nc");
+        let mut view = DiffView::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, 420.0),
+        ));
+        let output = crate::app::ui::test_run(&ctx, input, |ui| {
+            view.show(ui, &model, 1);
+        });
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<egui::epaint::RectShape>) {
+            match shape {
+                egui::Shape::Rect(rect) => out.push(rect.clone()),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut rects = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut rects);
+        }
+
+        let marks: Vec<_> = rects
+            .iter()
+            .filter(|rect| [ADD_MARK, MOD_MARK, DEL_MARK].contains(&rect.fill))
+            .collect();
+        assert!(!marks.is_empty(), "the overview drew no change marks");
+        assert!(
+            marks.iter().all(|rect| rect.fill.a() < 255),
+            "a change mark is still a solid colour: {:?}",
+            marks.iter().map(|rect| rect.fill).collect::<Vec<_>>()
+        );
+        assert!(
+            marks
+                .iter()
+                .all(|rect| rect.corner_radius == egui::CornerRadius::ZERO),
+            "a change mark still has rounded corners"
+        );
+
+        let thumb = rects
+            .iter()
+            .find(|rect| rect.fill == OVERVIEW_THUMB)
+            .expect("the overview drew no viewport thumb");
+        assert_eq!(
+            thumb.corner_radius,
+            egui::CornerRadius::ZERO,
+            "the overview thumb still has rounded corners"
+        );
     }
 }
