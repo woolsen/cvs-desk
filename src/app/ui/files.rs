@@ -64,8 +64,12 @@ const STATE_W: f32 = 130.0;
 /// A little wider than "Revision" needs, so its sort arrow fits.
 const REVISION_W: f32 = 72.0;
 const OPTS_W: f32 = 48.0;
-const TAG_W: f32 = 100.0;
 const DATE_W: f32 = 134.0;
+/// The sticky-tag glyph sits in the right end of the revision cell, so the column
+/// keeps its width whether or not the folder is pinned.
+const STICKY_ICON_SIZE: f32 = 12.0;
+const STICKY_ICON_W: f32 = 14.0;
+const STICKY_ICON_GAP: f32 = 3.0;
 /// The name keeps at least this much even in a narrow window.
 const MIN_NAME_W: f32 = 80.0;
 
@@ -84,6 +88,8 @@ const HEADER_ARROW_GAP: f32 = 4.0;
 /// a run of selected rows reads as one block instead of a stack of stripes.
 const ROW_SELECTED_BG: egui::Color32 = egui::Color32::from_rgb(204, 224, 247);
 const ROW_HOVER_BG: egui::Color32 = egui::Color32::from_rgb(238, 244, 251);
+/// The sticky-tag glyph and its folder line; the same muted indigo the tag column used.
+const STICKY_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 90, 120);
 
 /// Column positions inside one row, measured from the row's left edge. The fixed
 /// columns sum to the window width, so nothing drifts or overflows at the right edge.
@@ -92,26 +98,23 @@ struct ListGeometry {
     state_x: f32,
     revision_x: f32,
     opts_x: f32,
-    tag_x: f32,
     date_x: f32,
 }
 
 impl ListGeometry {
     fn for_width(width: f32) -> Self {
         let name_text_x = ICON_INSET + icons::GAP;
-        let fixed = STATE_W + REVISION_W + OPTS_W + TAG_W + DATE_W;
+        let fixed = STATE_W + REVISION_W + OPTS_W + DATE_W;
         let name_w = (width - name_text_x - fixed).max(MIN_NAME_W);
         let state_x = name_text_x + name_w;
         let revision_x = state_x + STATE_W;
         let opts_x = revision_x + REVISION_W;
-        let tag_x = opts_x + OPTS_W;
-        let date_x = tag_x + TAG_W;
+        let date_x = opts_x + OPTS_W;
         Self {
             name_w,
             state_x,
             revision_x,
             opts_x,
-            tag_x,
             date_x,
         }
     }
@@ -434,13 +437,6 @@ impl App {
                 key: None,
             },
             Heading {
-                label: "Sticky tag",
-                cell_x: g.tag_x,
-                w: TAG_W,
-                text_x: g.tag_x,
-                key: Some(SortKey::Tag),
-            },
-            Heading {
                 label: "Recorded",
                 cell_x: g.date_x,
                 w: DATE_W,
@@ -470,7 +466,7 @@ impl App {
             let response = ui.interact(cell, ui.scope_id().with(("list-heading", h.label)), sense);
             match h.key {
                 Some(key) => {
-                    let sorted = self.sort == key;
+                    let sorted = self.effective_sort() == key;
                     let tip = if sorted {
                         format!(
                             "Sorted by {}, {}. Click to reverse.",
@@ -513,7 +509,7 @@ impl App {
         }
 
         // Rules sit above the labels: a bottom line closes the strip, and faint column
-        // rules keep six columns legible without turning the band into a grid.
+        // rules keep five columns legible without turning the band into a grid.
         let painter = ui.painter();
         painter.hline(
             rect.x_range(),
@@ -530,7 +526,7 @@ impl App {
 
         let body = egui::TextStyle::Body.resolve(ui.style());
         for h in &headings {
-            let sorted = h.key.is_some_and(|key| self.sort == key);
+            let sorted = h.key.is_some_and(|key| self.effective_sort() == key);
             let color = if sorted {
                 HEADER_TEXT_ACTIVE
             } else {
@@ -800,6 +796,24 @@ impl App {
                 );
             });
         }
+
+        // The folder tag is shown once here, not repeated on every row. A row only gets
+        // its own glyph when its tag differs from this one.
+        if !self.sticky.is_empty() {
+            let full = sticky_banner(&self.sticky);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(sticky_icon(&self.sticky))
+                        .font(fonts::icon_font(STICKY_ICON_SIZE))
+                        .color(STICKY_COLOR),
+                );
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&full).small().color(STICKY_COLOR))
+                        .truncate(),
+                )
+                .on_hover_text(format!("{full}\nClear it with update -A."));
+            });
+        }
     }
 
     pub(super) fn ui_file_list(&mut self, ui: &mut egui::Ui) {
@@ -908,7 +922,7 @@ impl App {
                         } else {
                             egui::Color32::TRANSPARENT
                         };
-                        let tip = if r.is_dir {
+                        let mut tip = if r.is_dir {
                             if remote {
                                 format!(
                                     "{}\nDouble-click to create this empty folder (files are not checked out)",
@@ -920,6 +934,13 @@ impl App {
                         } else {
                             r.name.clone()
                         };
+                        if !r.tag.is_empty() {
+                            let (kind, name) = sticky_kind(&r.tag);
+                            tip.push_str(&format!("\nSticky {kind}: {name}"));
+                            if !self.sticky.is_empty() && r.tag != self.sticky {
+                                tip.push_str("\nThis file's tag differs from the folder's.");
+                            }
+                        }
                         resp.on_hover_text(tip);
                         let painter = ui.painter();
                         painter.rect_filled(rect, 0.0, bg);
@@ -958,23 +979,38 @@ impl App {
                             );
                         };
                         put(r.state.label(), left + g.state_x, STATE_W, color);
+                        // A row whose tag equals the folder's inherits it; only a file
+                        // with its own tag (or an untagged folder) needs the glyph.
+                        let show_sticky = !r.tag.is_empty()
+                            && (self.sticky.is_empty() || r.tag != self.sticky);
+                        let revision_w = if show_sticky {
+                            REVISION_W - STICKY_ICON_W - STICKY_ICON_GAP
+                        } else {
+                            REVISION_W
+                        };
                         put(
                             if r.revision.is_empty() { "-" } else { &r.revision },
                             left + g.revision_x,
-                            REVISION_W,
+                            revision_w,
                             color,
                         );
+                        if show_sticky {
+                            painter.text(
+                                egui::pos2(
+                                    left + g.revision_x + REVISION_W - STICKY_ICON_W / 2.0,
+                                    rect.center().y,
+                                ),
+                                egui::Align2::CENTER_CENTER,
+                                sticky_icon(&r.tag),
+                                fonts::icon_font(STICKY_ICON_SIZE),
+                                STICKY_COLOR,
+                            );
+                        }
                         put(
                             if r.options.is_empty() { "" } else { &r.options },
                             left + g.opts_x,
                             OPTS_W,
                             egui::Color32::from_gray(120),
-                        );
-                        put(
-                            if r.tag.is_empty() { "" } else { &r.tag },
-                            left + g.tag_x,
-                            TAG_W,
-                            egui::Color32::from_rgb(90, 90, 120),
                         );
                         put(
                             &pretty_time(&r.timestamp),
@@ -1221,6 +1257,43 @@ fn address_label(ui: &egui::Ui, path: &Path, max_width: f32, font: &egui::FontId
 /// so a specially written field is never lost.
 fn pretty_time(recorded: &str) -> String {
     entries::friendly_time(recorded)
+}
+
+/// The glyph for a sticky tag: a branch, a tag/revision, a date, or a pin for a value
+/// this client did not write (`Entries` also accepts a bare tag name).
+fn sticky_icon(tag: &str) -> &'static str {
+    match tag.as_bytes().first() {
+        Some(b'T') => egui_remixicon::icons::GIT_BRANCH_LINE,
+        Some(b'N') => egui_remixicon::icons::PRICE_TAG_3_LINE,
+        Some(b'D') => egui_remixicon::icons::CALENDAR_LINE,
+        _ => egui_remixicon::icons::PUSHPIN_LINE,
+    }
+}
+
+/// Split `CVS/Tag`'s marker from its name: `T` is a branch, `N` a tag or revision, `D` a
+/// date. Anything else is shown as a tag, marker included, rather than lost.
+fn sticky_kind(tag: &str) -> (&'static str, &str) {
+    let (kind, rest) = match tag.as_bytes().first() {
+        Some(b'T') => ("branch", &tag[1..]),
+        Some(b'N') => ("tag", &tag[1..]),
+        Some(b'D') => ("date", &tag[1..]),
+        _ => ("tag", tag),
+    };
+    if rest.is_empty() {
+        ("tag", tag)
+    } else {
+        (kind, rest)
+    }
+}
+
+/// The folder-level sentence: what the pin means for the next update and commit.
+fn sticky_banner(tag: &str) -> String {
+    let (kind, name) = sticky_kind(tag);
+    match kind {
+        "branch" => format!("Sticky branch: {name} — updates follow it; commits go to it."),
+        "date" => format!("Sticky date: {name} — updates stay on it; commits are refused."),
+        _ => format!("Sticky tag: {name} — updates stay on it; commits are refused."),
+    }
 }
 
 #[cfg(test)]
@@ -1555,7 +1628,7 @@ mod tests {
     #[test]
     fn each_heading_starts_where_its_column_starts() {
         let ctx = list_ctx();
-        let mut app = app_with_rows(vec![detailed_row("alpha.txt", "HEAD")]);
+        let mut app = app_with_rows(vec![detailed_row("alpha.txt", "")]);
         let frame = run_list(&ctx, &mut app, Vec::new());
         let x = |text: &str| {
             text_pos(&frame, text)
@@ -1571,8 +1644,11 @@ mod tests {
         assert_eq!(x("State"), x("Up-to-date"));
         assert_eq!(x("Revision"), x("1.2"));
         assert_eq!(x("Opts"), x("-kb"));
-        assert_eq!(x("Sticky tag"), x("HEAD"));
         assert_eq!(x("Recorded"), x(&pretty_time("Sat Nov 22 09:14:03 2026")));
+        assert!(
+            text_pos(&frame, "Sticky tag").is_none(),
+            "the tag has no column of its own"
+        );
     }
 
     #[test]
@@ -1631,23 +1707,68 @@ mod tests {
     }
 
     #[test]
-    fn clicking_the_tag_heading_orders_rows_by_tag() {
-        let ctx = list_ctx();
-        let mut app = app_with_rows(vec![
-            detailed_row("alpha.txt", "Release_1_0"),
-            detailed_row("beta.txt", "HEAD"),
-        ]);
-        app.sort = SortKey::State;
-        app.order_dirty = true;
-
-        click_heading(&ctx, &mut app, "Sticky tag");
-        app.ensure_order();
-
+    fn sticky_markers_name_their_kind() {
+        assert_eq!(sticky_kind("TBRANCH"), ("branch", "BRANCH"));
+        assert_eq!(sticky_kind("N1.2"), ("tag", "1.2"));
+        assert_eq!(sticky_kind("D2026.11.24"), ("date", "2026.11.24"));
+        assert_eq!(sticky_kind("HEAD"), ("tag", "HEAD"));
         assert_eq!(
-            app.order,
-            vec![1, 0],
-            "HEAD must sort before Release_1_0, not by file name"
+            sticky_kind("N"),
+            ("tag", "N"),
+            "a bare marker is not a name"
         );
+    }
+
+    #[test]
+    fn a_sticky_row_shows_a_tag_icon_after_its_revision() {
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![detailed_row("alpha.txt", "TBRANCH")]);
+        let frame = run_list(&ctx, &mut app, Vec::new());
+        let revision = text_pos(&frame, "1.2").expect("the revision is on screen");
+        let icons = arrow_positions(&frame, sticky_icon("TBRANCH"));
+
+        assert_eq!(icons.len(), 1, "one glyph for the pinned row");
+        assert!(icons[0].x > revision.x, "the glyph follows the revision");
+    }
+
+    #[test]
+    fn a_row_matching_the_folder_tag_does_not_repeat_the_icon() {
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![detailed_row("alpha.txt", "TBRANCH")]);
+        app.sticky = "TBRANCH".into();
+        let frame = run_list(&ctx, &mut app, Vec::new());
+        let header_y = text_pos(&frame, "Revision").unwrap().y;
+        let row_icons: Vec<_> = arrow_positions(&frame, sticky_icon("TBRANCH"))
+            .into_iter()
+            .filter(|pos| pos.y > header_y)
+            .collect();
+
+        assert!(
+            row_icons.is_empty(),
+            "the folder line already names this tag"
+        );
+        assert!(
+            text_pos(&frame, &sticky_banner("TBRANCH")).is_some(),
+            "the folder tag is named once above the list"
+        );
+    }
+
+    #[test]
+    fn a_folder_tag_is_named_once_above_the_list() {
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![row("alpha.txt", false)]);
+        app.sticky = "N1.2".into();
+        let frame = run_list(&ctx, &mut app, Vec::new());
+        let header_y = text_pos(&frame, "Revision").unwrap().y;
+        let banner_icon = arrow_positions(&frame, sticky_icon("N1.2"))
+            .into_iter()
+            .find(|pos| pos.y < header_y);
+
+        assert!(
+            text_pos(&frame, &sticky_banner("N1.2")).is_some(),
+            "the tag's name is on screen, not only in a tooltip"
+        );
+        assert!(banner_icon.is_some(), "the banner carries the type glyph");
     }
 
     #[test]

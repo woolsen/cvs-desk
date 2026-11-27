@@ -102,6 +102,9 @@ pub struct Loaded {
     pub has_cvs: bool,
     pub root: String,
     pub repository: String,
+    /// The first line of `CVS/Tag`, e.g. `TBRANCH` or `N1.2`; empty when the folder is
+    /// not pinned to a tag, branch or date.
+    pub sticky: String,
     pub partial_checkout: bool,
 }
 
@@ -395,6 +398,12 @@ pub fn load(dir: &Path) -> Loaded {
     let cvs_dir = dir.join("CVS");
     let has_cvs = cvs_dir.is_dir();
     let partial_checkout = cvs_dir.join("Entries.Static").is_file();
+    // `CVS/Tag` is the folder's sticky tag; its first line is the marker the update
+    // protocol sends. A missing file is the normal HEAD case.
+    let sticky = read_text(&cvs_dir.join("Tag"))
+        .and_then(|text| text.lines().next().map(|line| line.trim().to_string()))
+        .filter(|line| !line.is_empty())
+        .unwrap_or_default();
     let mut notes = Vec::new();
 
     let entries_path = cvs_dir.join("Entries");
@@ -517,6 +526,7 @@ pub fn load(dir: &Path) -> Loaded {
         has_cvs,
         root,
         repository,
+        sticky,
         partial_checkout,
     }
 }
@@ -1040,6 +1050,27 @@ mod tests {
 
         std::fs::remove_dir_all(dir).ok();
         std::fs::remove_dir_all(plain).ok();
+    }
+
+    #[test]
+    fn a_tag_file_is_the_folders_sticky_tag() {
+        let dir = temp_dir("sticky-tag");
+        std::fs::create_dir_all(dir.join("CVS")).unwrap();
+        std::fs::write(dir.join("CVS").join("Entries"), "").unwrap();
+        std::fs::write(dir.join("CVS").join("Tag"), "TBRANCH\r\n").unwrap();
+
+        assert_eq!(load(&dir).sticky, "TBRANCH");
+
+        std::fs::write(dir.join("CVS").join("Tag"), "  \r\n").unwrap();
+        assert!(load(&dir).sticky.is_empty(), "a blank tag file means HEAD");
+
+        std::fs::remove_file(dir.join("CVS").join("Tag")).unwrap();
+        assert!(
+            load(&dir).sticky.is_empty(),
+            "a missing tag file means HEAD"
+        );
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         has_cvs: true,
         root: String::new(),
         repository: String::new(),
+        sticky: String::new(),
         partial_checkout: false,
         selected: HashSet::new(),
         anchor: None,
@@ -110,6 +111,7 @@ pub(super) fn loaded(rows: Vec<Row>) -> entries::Loaded {
         has_cvs: true,
         root: String::new(),
         repository: String::new(),
+        sticky: String::new(),
         partial_checkout: false,
     }
 }

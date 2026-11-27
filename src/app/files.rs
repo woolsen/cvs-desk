@@ -394,6 +394,22 @@ impl App {
         ctx.memory_mut(|m| m.surrender_focus(search_id()));
     }
 
+    /// Does any row carry a sticky tag? Sorting by it is only meaningful then; the
+    /// folder's own `CVS/Tag` does not order rows on its own.
+    pub(super) fn has_row_tags(&self) -> bool {
+        self.rows.iter().any(|row| !row.tag.is_empty())
+    }
+
+    /// The sort actually used. A saved tag sort falls back to the name while no row
+    /// carries a tag, so the list never looks unsorted; a tagged folder restores it.
+    pub(super) fn effective_sort(&self) -> SortKey {
+        if self.sort == SortKey::Tag && !self.has_row_tags() {
+            SortKey::Name
+        } else {
+            self.sort
+        }
+    }
+
     /// Rebuild the visible order only when something that affects it changed.
     pub(super) fn ensure_order(&mut self) {
         if !self.order_dirty {
@@ -403,7 +419,7 @@ impl App {
         let mut order: Vec<usize> = (0..self.rows.len())
             .filter(|i| self.row_matches(&self.rows[*i], search.as_ref()))
             .collect();
-        let key = self.sort;
+        let key = self.effective_sort();
         let ascending = self.sort_asc;
         let rows = &self.rows;
         order.sort_by(|a, b| compare_rows(key, ascending, &rows[*a], &rows[*b]));
@@ -654,12 +670,12 @@ impl App {
     }
 
     pub(super) fn flip_sort(&mut self, k: SortKey) {
-        if self.sort == k {
+        if self.effective_sort() == k {
             self.sort_asc = !self.sort_asc;
         } else {
-            self.sort = k;
             self.sort_asc = true;
         }
+        self.sort = k;
         self.order_dirty = true;
     }
 
@@ -769,6 +785,31 @@ mod tests {
             compare_rows(SortKey::Name, false, &a, &b),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn sticky_tags_sort_by_the_rows_tag() {
+        let mut release = row("alpha.txt", false);
+        release.tag = "Release_1_0".into();
+        let mut head = row("beta.txt", false);
+        head.tag = "HEAD".into();
+
+        assert_eq!(
+            compare_rows(SortKey::Tag, true, &head, &release),
+            Ordering::Less,
+            "HEAD sorts before Release_1_0, not by file name"
+        );
+    }
+
+    #[test]
+    fn a_tag_sort_without_tags_falls_back_to_the_name() {
+        let mut app = app_with_rows(vec![row("beta.txt", false), row("alpha.txt", false)]);
+        app.sort = SortKey::Tag;
+        app.sort_asc = true;
+        app.ensure_order();
+
+        assert_eq!(app.sort, SortKey::Tag, "the saved choice is kept");
+        assert_eq!(app.order, vec![1, 0], "with no tags the list sorts by name");
     }
 
     #[test]

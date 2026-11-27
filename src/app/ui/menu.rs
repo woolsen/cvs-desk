@@ -139,19 +139,19 @@ impl App {
                         }
                     });
                     ui.menu_button("Sort by", |ui| {
-                        for k in [
-                            SortKey::Name,
-                            SortKey::State,
-                            SortKey::Revision,
-                            SortKey::Tag,
-                            SortKey::Date,
-                        ] {
-                            let label = if self.sort == k {
+                        let active = self.effective_sort();
+                        let mut keys = vec![SortKey::Name, SortKey::State, SortKey::Revision];
+                        if self.has_row_tags() {
+                            keys.push(SortKey::Tag);
+                        }
+                        keys.push(SortKey::Date);
+                        for k in keys {
+                            let label = if active == k {
                                 format!("{} {}", k.label(), if self.sort_asc { "↑" } else { "↓" })
                             } else {
                                 k.label().to_owned()
                             };
-                            if ui.radio(self.sort == k, label).clicked() {
+                            if ui.radio(active == k, label).clicked() {
                                 self.flip_sort(k);
                             }
                         }

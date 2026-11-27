@@ -107,6 +107,9 @@ pub(crate) struct App {
     has_cvs: bool,
     root: String,
     repository: String,
+    /// The first line of `CVS/Tag`, e.g. `TBRANCH`: the folder's sticky tag. Empty means
+    /// the folder follows HEAD.
+    sticky: String,
     /// `CVS/Entries.Static` is present: this folder was checked out without all of its
     /// repository files. It is context, not an error.
     partial_checkout: bool,
@@ -302,6 +305,7 @@ impl App {
             has_cvs: false,
             root: String::new(),
             repository: String::new(),
+            sticky: String::new(),
             partial_checkout: false,
             selected: HashSet::new(),
             anchor: None,
@@ -420,6 +424,7 @@ impl App {
         // rows when the read finishes.
         self.root.clear();
         self.repository.clear();
+        self.sticky.clear();
         self.partial_checkout = false;
         self.selected.clear();
         self.anchor = None;
@@ -565,6 +570,7 @@ impl App {
         self.has_cvs = loaded.has_cvs;
         self.root = loaded.root;
         self.repository = loaded.repository;
+        self.sticky = loaded.sticky;
         self.partial_checkout = loaded.partial_checkout;
         self.order_dirty = true;
         self.state_dirty = true;
