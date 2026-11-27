@@ -136,6 +136,10 @@ pub(crate) struct App {
     /// click. Cleared when the selection is cleared or the folder is read again.
     anchor: Option<usize>,
     filters: Filters,
+    /// True while the filter bar above the list is unfolded. The bar starts folded
+    /// into the funnel button at the right of the nav bar, so it only takes a row
+    /// when the user asks for it.
+    filters_open: bool,
     /// What the search box above the list is looking for. Empty shows everything.
     search: String,
     /// True while the search field is open in the nav bar. Closing it clears `search`,
@@ -249,6 +253,7 @@ impl App {
             selected: HashSet::new(),
             anchor: None,
             filters,
+            filters_open: false,
             search: String::new(),
             search_open: false,
             focus_search: false,

@@ -53,6 +53,7 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         selected: HashSet::new(),
         anchor: None,
         filters: Filters::default(),
+        filters_open: false,
         search: String::new(),
         search_open: false,
         focus_search: false,

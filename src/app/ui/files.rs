@@ -46,12 +46,15 @@ const UP: &str = egui_remixicon::icons::ARROW_UP_LINE;
 const RELOAD: &str = egui_remixicon::icons::REFRESH_LINE;
 const SEARCH: &str = egui_remixicon::icons::SEARCH_LINE;
 const CLOSE: &str = egui_remixicon::icons::CLOSE_LINE;
+const FILTER: &str = egui_remixicon::icons::FILTER_3_LINE;
 
 /// How much of the nav bar the search field takes when it is open.
 const SEARCH_FIELD_W: f32 = 200.0;
 /// Room for the icon button that stays at the far right (search when closed, close
 /// when open). The button's real width comes from its padding, so leave a little air.
 const SEARCH_BUTTON_W: f32 = 30.0;
+/// Room for the funnel button at the far right that folds the filter bar away.
+const FILTER_BUTTON_W: f32 = 30.0;
 
 /// The icon's inset in the name column, and the fixed widths after the name. The
 /// headings and the rows both take their x positions from [`ListGeometry`], so a heading
@@ -180,16 +183,17 @@ impl App {
             }
             ui.separator();
 
-            // The search control always sits at the far right: one icon button when it is
-            // closed, the field and that button when it is open. The address bar takes
-            // everything else, and is measured against the control's real width so no
+            // The search control always sits at the far right, and the funnel that
+            // folds the filter bar away sits just right of it. The address bar takes
+            // everything else, and is measured against the controls' real width so no
             // empty gutter is left at the edge.
             let search_width = if self.search_open {
                 SEARCH_FIELD_W + 3.0 + SEARCH_BUTTON_W
             } else {
                 SEARCH_BUTTON_W
             };
-            let field_width = (ui.available_width() - search_width - 9.0).max(140.0);
+            let controls_width = search_width + 3.0 + FILTER_BUTTON_W;
+            let field_width = (ui.available_width() - controls_width - 9.0).max(140.0);
             if self.address_editing {
                 let id = address_id();
                 if self.focus_address {
@@ -260,9 +264,10 @@ impl App {
             }
 
             ui.add_space(6.0);
-            // A right-to-left row pins the search control to the right edge; the field
-            // inside it keeps its own left-to-right text.
+            // A right-to-left row pins the controls to the right edge; the field
+            // inside the search control keeps its own left-to-right text.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.ui_filter_toggle(ui);
                 self.ui_search_box(ui);
             });
         });
@@ -277,6 +282,34 @@ impl App {
             // An invalid path leaves the field open with the typed text, so a typo can
             // be corrected instead of silently snapping back to the old folder.
             ui.memory_mut(|m| m.request_focus(address_id()));
+        }
+    }
+
+    /// The filter button at the far right of the nav bar. The filter row above the
+    /// list is only shown while this is open, so the list keeps its height by default.
+    /// A filter that is not the default keeps the button lit while the row is folded,
+    /// so a hidden row never hides the fact that the list is filtered.
+    fn ui_filter_toggle(&mut self, ui: &mut egui::Ui) {
+        let preset = self.filters.preset();
+        let filtered = !self.filters.is_default();
+        let response = ui
+            .add(
+                egui::Button::new(egui::RichText::new(FILTER).font(fonts::icon_font(icons::SIZE)))
+                    .min_size(egui::vec2(24.0, 22.0))
+                    .selected(self.filters_open || filtered),
+            )
+            .on_hover_text(if self.filters_open {
+                format!("Hide the filter bar. Filter: {}.", preset.label())
+            } else if filtered {
+                format!(
+                    "Show the filter bar. Filter: {} — the list is filtered.",
+                    preset.label()
+                )
+            } else {
+                "Show the filter bar: task presets, scope and CVS states.".to_owned()
+            });
+        if response.clicked() {
+            self.filters_open = !self.filters_open;
         }
     }
 
@@ -632,8 +665,17 @@ impl App {
 
     /// The scope bar: the one place that says whether the repository side is hidden,
     /// still loading, or unavailable. It sits above the column headings so the source
-    /// of the list is always on screen.
+    /// of the list is always on screen. The row is folded away by default; the funnel
+    /// button in the nav bar unfolds it.
     fn ui_scope_bar(&mut self, ui: &mut egui::Ui) {
+        if self.filters_open {
+            self.ui_filter_row(ui);
+        }
+        self.ui_scope_warnings(ui);
+    }
+
+    /// The filter row itself: scope, presets and state switches.
+    fn ui_filter_row(&mut self, ui: &mut egui::Ui) {
         let (_, remote) = self.scope_counts();
         let remote_label = match self.remote_state {
             RemoteState::Off => "Not checked out (—)".to_string(),
@@ -703,7 +745,11 @@ impl App {
                 self.order_dirty = true;
             }
         }
+    }
 
+    /// Warnings that stay visible even while the filter row is folded: selection
+    /// hidden behind the filters, and a partial checkout that update will not fill.
+    fn ui_scope_warnings(&mut self, ui: &mut egui::Ui) {
         let hidden = self.hidden_selected_count();
         if hidden > 0 {
             ui.horizontal(|ui| {
@@ -1910,6 +1956,54 @@ mod tests {
         assert!(
             (back - before).abs() < LAYOUT_TOL,
             "closing the search moved the list: {before} -> {back}"
+        );
+    }
+
+    #[test]
+    fn the_filter_bar_is_folded_into_the_funnel_button_until_clicked() {
+        let ctx = list_ctx();
+        typography::install(&ctx);
+        let mut app = app_with_rows(vec![row("alpha.txt", false)]);
+
+        let closed = run_list(&ctx, &mut app, Vec::new());
+        assert!(!app.filters_open, "the filter row starts folded");
+        assert!(
+            text_pos(&closed, "Working copy").is_none(),
+            "a folded filter row must not take a line above the list"
+        );
+
+        let funnel = text_pos(&closed, FILTER).expect("the funnel button is in the nav bar");
+        let at = funnel + egui::vec2(icons::SIZE / 2.0, icons::SIZE / 2.0);
+        run_list(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(at), primary(at, true)],
+        );
+        let opened = run_list(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(at), primary(at, false)],
+        );
+
+        assert!(app.filters_open, "the click must unfold the filter row");
+        assert!(
+            text_pos(&opened, "Working copy").is_some(),
+            "the unfolded row shows the scope choices"
+        );
+    }
+
+    #[test]
+    fn the_filter_button_sits_right_of_the_search_button() {
+        let ctx = list_ctx();
+        typography::install(&ctx);
+        let mut app = app_with_rows(vec![row("alpha.txt", false)]);
+
+        let output = run_list(&ctx, &mut app, Vec::new());
+        let search = text_pos(&output, SEARCH).expect("the search button is in the nav bar");
+        let filter = text_pos(&output, FILTER).expect("the funnel button is in the nav bar");
+        assert!(
+            filter.x > search.x,
+            "the funnel ({filter:?}) must sit right of the search ({search:?})"
         );
     }
 
