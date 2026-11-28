@@ -31,10 +31,11 @@ may honour it.
 `ann`, `blame`, `rt`, `rfreeze`, `ta`, `freeze`, `adm`, `rcs`, `hi`, `his`, `patch`, `pa`,
 `exp`, `ex`, `im`, `imp`, `re`, `rel`, `logon`, `lgn`, `ve`, `ver`.
 
-`import` has no editor, so `-m` is required. `commit` without `-m`/`-F` opens `$CVSEDITOR`,
-`$VISUAL`, `$EDITOR`, or Notepad, starting from `CVS/Template` when the repository sent one.
-`.cvsignore` is honoured by `import` only; `update` and `status` still rely on the server for
-ignore decisions. `-z 0..9` negotiates the protocol's `Gzip-stream` compression after the
+`commit` without `-m`/`-F` opens `$CVSEDITOR`, `$VISUAL`, `$EDITOR`, or Notepad, starting from
+`CVS/Template` when the repository sent one; `import` opens the same editor when `-m` is absent.
+Unknown files follow the default ignore list, `$CVSIGNORE`, `~/.cvsignore`, and each folder's
+`.cvsignore`, and a server that supports `Questionable` makes the final call. `-z 0..9`
+negotiates the protocol's `Gzip-stream` compression after the
 handshake; despite the name, its two directions carry zlib streams, not gzip ones. A server
 without the capability gets a plain stream and a warning on stderr.
 
