@@ -1178,6 +1178,14 @@ fn first_error(lines: &[String]) -> String {
 /// it fails, and a checkout prints progress first, so the first non-empty line is often
 /// not the error.
 fn command_error(lines: &[String]) -> String {
+    // A line that says the command aborted is the one worth showing, before any progress
+    // or status line that happens to contain another keyword.
+    if let Some(line) = lines
+        .iter()
+        .find(|line| line.to_ascii_lowercase().contains("aborted"))
+    {
+        return line.clone();
+    }
     lines
         .iter()
         .find(|line| {
@@ -1185,12 +1193,12 @@ fn command_error(lines: &[String]) -> String {
             if trimmed.starts_with("Logging in to ")
                 || trimmed.starts_with("cvs server: Updating ")
                 || trimmed.starts_with("cvs checkout: Updating ")
+                || is_status_line(trimmed)
             {
                 return false;
             }
             let lower = line.to_ascii_lowercase();
-            lower.contains("aborted")
-                || lower.contains("failed")
+            lower.contains("failed")
                 || lower.contains("refused")
                 || lower.contains("cannot")
                 || lower.contains("could not")
@@ -1202,6 +1210,14 @@ fn command_error(lines: &[String]) -> String {
         .or_else(|| lines.iter().rev().find(|line| !line.trim().is_empty()))
         .cloned()
         .unwrap_or_else(|| "cvs failed".to_string())
+}
+
+/// A checkout status line such as `U src/file.rs` or `C src/file.rs`.
+fn is_status_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() > 2
+        && bytes[1] == b' '
+        && matches!(bytes[0], b'U' | b'M' | b'C' | b'A' | b'R' | b'P')
 }
 
 #[cfg(test)]
@@ -1254,6 +1270,24 @@ mod tests {
             command_error(&lines),
             "cvs [checkout aborted]: cannot find module"
         );
+    }
+
+    #[test]
+    fn a_file_line_is_not_the_error() {
+        let lines = vec![
+            "U failed_test.rs".to_string(),
+            "cvs [checkout aborted]: cannot find module".to_string(),
+        ];
+        assert_eq!(
+            command_error(&lines),
+            "cvs [checkout aborted]: cannot find module"
+        );
+
+        let lines = vec![
+            "U failed_test.rs".to_string(),
+            "cvs checkout: cannot find module".to_string(),
+        ];
+        assert_eq!(command_error(&lines), "cvs checkout: cannot find module");
     }
 
     #[test]

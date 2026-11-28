@@ -201,7 +201,10 @@ impl Root {
         let path_start = rest.find('/').unwrap_or(rest.len());
         let mut host_start = base;
         let mut password_colon = None;
-        let (user, password, host_part) = match rest[..path_start].find('@') {
+        let at = rest[..path_start]
+            .find('@')
+            .filter(|&at| !at_is_path(rest, at));
+        let (user, password, host_part) = match at {
             Some(at) => {
                 let info = &rest[..at];
                 host_start = base + at;
@@ -312,6 +315,19 @@ fn default_port(method: &Method) -> u16 {
         Method::Ext | Method::Local => 0,
         _ => DEFAULT_PSERVER_PORT,
     }
+}
+
+/// Whether the `@` at `at` is inside a Windows path rather than the userinfo.
+pub(crate) fn at_is_path(rest: &str, at: usize) -> bool {
+    let Some(colon) = rest[..at].find(':') else {
+        return false;
+    };
+    let between = rest[colon + 1..at].as_bytes();
+    // A Windows path names a drive after a colon: `C:\...` or `C:/...`. A password may
+    // contain a backslash too, so a bare backslash is not enough.
+    between
+        .windows(3)
+        .any(|w| w[0].is_ascii_alphabetic() && w[1] == b':' && matches!(w[2], b'\\' | b'/'))
 }
 
 /// Split `host[:port]:path` at the colon before the path.
@@ -440,6 +456,30 @@ mod tests {
         assert_eq!(root.key, ":pserver:ann@cvshost:/repo");
         assert_eq!(root.display(), ":pserver:ann@cvshost:/repo");
         assert!(!format!("{}", scrub(":pserver:ann:secret@cvshost:/repo")).contains("secret"));
+    }
+
+    #[test]
+    fn a_backslash_path_may_contain_an_at_sign_without_a_user() {
+        let root = Root::parse(":pserver:host:C:\\repos\\a@b").unwrap();
+        assert_eq!(root.user, current_user());
+        assert_eq!(root.host, "host");
+        assert_eq!(root.path, "C:\\repos\\a@b");
+        assert!(root.password.is_none());
+
+        let root = Root::parse(":pserver:ann:secret@host:C:\\repos\\a@b").unwrap();
+        assert_eq!(root.user, "ann");
+        assert_eq!(root.password.as_deref(), Some("secret"));
+        assert_eq!(root.host, "host");
+        assert_eq!(root.path, "C:\\repos\\a@b");
+    }
+
+    #[test]
+    fn a_password_may_contain_a_backslash() {
+        let root = Root::parse(":pserver:ann:se\\cret@host:/repo").unwrap();
+        assert_eq!(root.user, "ann");
+        assert_eq!(root.password.as_deref(), Some("se\\cret"));
+        assert_eq!(root.host, "host");
+        assert_eq!(root.path, "/repo");
     }
 
     #[test]

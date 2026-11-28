@@ -494,11 +494,7 @@ fn destination_check(
     if target.is_file() {
         return DestinationCheck::RefuseFile;
     }
-    if target.components().any(|part| {
-        part.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case("CVS")
-    }) {
+    if contains_cvs_metadata(target) {
         return DestinationCheck::RefuseMetadata;
     }
     let cvs = target.join("CVS");
@@ -516,6 +512,29 @@ fn destination_check(
         return DestinationCheck::Confirm;
     }
     DestinationCheck::Ready
+}
+
+/// A folder named CVS is only special when it is a working copy's metadata folder.
+fn contains_cvs_metadata(target: &Path) -> bool {
+    let mut path = PathBuf::new();
+    for part in target.components() {
+        path.push(part);
+        if part
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("CVS")
+            && is_cvs_metadata(&path)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_cvs_metadata(path: &Path) -> bool {
+    path.join("Entries").is_file()
+        || path.join("Root").is_file()
+        || path.join("Repository").is_file()
 }
 
 fn is_empty_dir(path: &Path) -> bool {
@@ -1075,9 +1094,23 @@ mod tests {
         let base = temp_dir("checkout-metadata-inside");
         let target = base.join("CVS").join("proj");
         std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(base.join("CVS").join("Root"), b"x").unwrap();
         assert_eq!(
             destination_check(&target, None, None, ROOT, MODULE),
             DestinationCheck::RefuseMetadata
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_plain_folder_named_cvs_is_not_metadata() {
+        let base = temp_dir("checkout-plain-cvs");
+        let target = base.join("cvs").join("proj");
+        std::fs::create_dir_all(&target).unwrap();
+        assert_eq!(
+            destination_check(&target, None, None, ROOT, MODULE),
+            DestinationCheck::Ready,
+            "a workspace folder named cvs is not a metadata folder"
         );
         std::fs::remove_dir_all(&base).ok();
     }

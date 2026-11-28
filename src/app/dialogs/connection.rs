@@ -7,14 +7,15 @@ use cvsdesk::cvs_client::root::{Method, Root};
 /// The root to run with, and the password typed into it, if any.
 pub(super) fn split_root(raw: &str) -> (String, Option<String>) {
     let raw = raw.trim();
+    let cleaned = cvsdesk::entries::clean_root(raw);
     match Root::parse(raw) {
-        Ok(root) => {
+        Ok(root) if cleaned == root.key => {
             let password = matches!(root.method, Method::Pserver)
                 .then_some(root.password)
                 .flatten();
             (root.key, password)
         }
-        Err(_) => (cvsdesk::entries::clean_root(raw), None),
+        _ => (cleaned, None),
     }
 }
 
@@ -35,6 +36,11 @@ pub(super) fn password_for(root: &str, field: &str) -> (String, Option<String>) 
 /// Whether a root uses the pserver method, for the password field and its hint.
 pub(super) fn is_pserver(root: &str) -> bool {
     let root = root.trim();
+    if root.to_ascii_lowercase().starts_with("pserver:") {
+        // A root written without its leading colon: the client reads it as a local path,
+        // but the window should still offer the password field.
+        return true;
+    }
     match Root::parse(root) {
         Ok(root) => matches!(root.method, Method::Pserver),
         Err(_) => root.starts_with(":pserver:"),
@@ -93,6 +99,15 @@ mod tests {
         assert_eq!(password, None);
         assert!(has_password(":pserver:ann:secret@host"));
         assert!(!has_password(":pserver:ann@host:/repo"));
+    }
+
+    #[test]
+    fn a_root_without_its_leading_colon_is_redacted_before_a_command() {
+        let (root, password) = split_root("pserver:ann:secret@host:/repo");
+        assert_eq!(root, "pserver:ann@host:/repo");
+        assert_eq!(password, None);
+        assert!(is_pserver("pserver:ann@host:/repo"));
+        assert!(has_password("pserver:ann:secret@host:/repo"));
     }
 
     #[test]

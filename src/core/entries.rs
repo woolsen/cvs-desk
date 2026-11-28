@@ -706,6 +706,9 @@ pub fn redact_root_password(raw: &str) -> String {
 fn redact_userinfo(rest: &str) -> Option<(String, String)> {
     let path_start = rest.find('/').unwrap_or(rest.len());
     let at = rest[..path_start].find('@')?;
+    if crate::client::root::at_is_path(rest, at) {
+        return None;
+    }
     let info = &rest[..at];
     let colon = info.find(':')?;
     Some((rest[..colon].to_string(), rest[at..].to_string()))
@@ -776,6 +779,7 @@ pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
     // splitter below finds the path after the host.
     let path_start = rest.find('/').unwrap_or(rest.len());
     let (userinfo, host_start) = match rest[..path_start].find('@') {
+        Some(at) if crate::client::root::at_is_path(rest, at) => ("", 0),
         Some(at) => (&rest[..at], at + 1),
         None => ("", 0),
     };
@@ -1083,6 +1087,18 @@ mod tests {
         assert_eq!(host, "host");
         assert!(port.is_empty());
         assert_eq!(path, "C:\\repos\\team@corp\\repo");
+    }
+
+    #[test]
+    fn a_no_user_path_with_an_at_sign_is_kept() {
+        let root = ":pserver:host:C:\\repos\\a@b";
+        assert_eq!(clean_root(root), root);
+        let (kind, user, host, port, path) = parse_cvsroot(root);
+        assert_eq!(kind, ConnKind::Pserver);
+        assert!(user.is_empty());
+        assert_eq!(host, "host");
+        assert!(port.is_empty());
+        assert_eq!(path, "C:\\repos\\a@b");
     }
 
     #[test]
