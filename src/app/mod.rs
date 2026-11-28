@@ -90,6 +90,9 @@ pub(super) struct HistoryWait {
     pub working_state: State,
     /// True when an open File History window asked for a refresh.
     pub refresh: bool,
+    /// True when the reply should open the diff window as well, as the file menu's
+    /// Diff does.
+    pub open_diff: bool,
 }
 
 pub(crate) struct App {

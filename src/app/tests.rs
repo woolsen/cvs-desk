@@ -724,6 +724,7 @@ fn a_finished_history_log_opens_the_history_window() {
         working: "1.2".into(),
         working_state: State::Unchanged,
         refresh: false,
+        open_diff: false,
     });
 
     let (tx, rx) = channel();
@@ -741,6 +742,42 @@ fn a_finished_history_log_opens_the_history_window() {
         Some(Dialog::History(ref state)) => {
             assert_eq!(state.file(), "main.c");
             assert_eq!(state.revision_count(), 1);
+        }
+        _ => panic!("the finished log should open the File History window"),
+    }
+}
+
+#[test]
+fn a_right_click_diff_opens_the_history_with_the_diff_window() {
+    let mut app = app_with_rows(Vec::new());
+    app.history_waiting = Some(HistoryWait {
+        dir: app.dir.clone(),
+        root: app.root.clone(),
+        file: "main.c".into(),
+        working: "1.2".into(),
+        working_state: State::Unchanged,
+        refresh: false,
+        open_diff: true,
+    });
+
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Line("revision 1.2".into())).unwrap();
+    tx.send(Msg::Line(
+        "date: 2026/11/19 09:41:13;  author: bob;  state: Exp;".into(),
+    ))
+    .unwrap();
+    tx.send(Msg::Line("Initial revision".into())).unwrap();
+    tx.send(Msg::Done(0)).unwrap();
+    app.poll();
+
+    match app.dialog {
+        Some(Dialog::History(ref state)) => {
+            assert_eq!(state.file(), "main.c");
+            assert!(
+                state.diff_is_open(),
+                "the diff window must open with the history"
+            );
         }
         _ => panic!("the finished log should open the File History window"),
     }

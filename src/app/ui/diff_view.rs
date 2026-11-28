@@ -143,9 +143,30 @@ impl DiffView {
         }
     }
 
-    /// Draw one model. `generation` changes whenever the window receives a new pair;
-    /// it resets the scroll position and invalidates the highlight cache.
+    /// Draw one model with the default header: the two version titles and the
+    /// navigation controls. `generation` changes whenever the window receives a new
+    /// pair; it resets the scroll position and invalidates the highlight cache.
+    #[cfg(test)]
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, model: &DiffModel, generation: u64) {
+        let focus_id = self.begin(ui, model, generation);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(&model.left.title).strong());
+            ui.label(egui::RichText::new("→").color(GUTTER_TEXT));
+            ui.label(egui::RichText::new(&model.right.title).strong());
+            ui.separator();
+            self.header_controls(ui, model, focus_id);
+        });
+        self.show_body(ui, model, focus_id);
+    }
+
+    /// Set up the frame: rebuild the highlight cache and read the keyboard. The
+    /// caller draws its own header, then calls [`Self::show_body`].
+    pub(crate) fn begin(
+        &mut self,
+        ui: &mut egui::Ui,
+        model: &DiffModel,
+        generation: u64,
+    ) -> egui::Id {
         let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style())
             .with_font_size(typography::MONO);
         let rebuild = self
@@ -163,7 +184,11 @@ impl DiffView {
         let focus_id = ui.make_persistent_id("side_by_side_diff_focus");
         let focused = ui.ctx().memory(|memory| memory.has_focus(focus_id));
         self.handle_keys(ui, model, focus_id, focused);
-        self.header(ui, model, focus_id);
+        focus_id
+    }
+
+    /// The diff body: notices and the two columns, without a header.
+    pub(crate) fn show_body(&mut self, ui: &mut egui::Ui, model: &DiffModel, focus_id: egui::Id) {
         self.notices(ui, model);
 
         if model.rows.is_empty() {
@@ -551,68 +576,67 @@ impl DiffView {
         TextPos { side, row, ch }
     }
 
-    fn header(&mut self, ui: &mut egui::Ui, model: &DiffModel, focus_id: egui::Id) {
+    /// The navigation controls the default header and the history window share.
+    /// The caller places them in its own horizontal row.
+    pub(crate) fn header_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        model: &DiffModel,
+        focus_id: egui::Id,
+    ) {
         let mut target = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(&model.left.title).strong());
-            ui.label(egui::RichText::new("→").color(GUTTER_TEXT));
-            ui.label(egui::RichText::new(&model.right.title).strong());
-
-            if !model.hunks.is_empty() {
-                ui.separator();
-                if ui
-                    .small_button("Prev")
-                    .on_hover_text("Previous change")
-                    .clicked()
-                {
-                    let current = self
-                        .active_row()
-                        .and_then(|row| hunk_at(model, row))
-                        .map_or(model.hunks.len() - 1, |index| index.saturating_sub(1));
-                    target = Some(model.hunks[current].first_row);
-                    ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
-                }
-                if ui
-                    .small_button("Next")
-                    .on_hover_text("Next change")
-                    .clicked()
-                {
-                    let current = self
-                        .active_row()
-                        .and_then(|row| hunk_at(model, row))
-                        .map_or(0, |index| (index + 1).min(model.hunks.len() - 1));
-                    target = Some(model.hunks[current].first_row);
-                    ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
-                }
-                let changes = model.hunks.len();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{changes} difference{}",
-                        if changes == 1 { "" } else { "s" }
-                    ))
-                    .small()
-                    .color(DIFF_COUNT),
-                );
-            } else if model.stats.added == 0 && model.stats.removed == 0 && model.notices.is_empty()
+        if !model.hunks.is_empty() {
+            if ui
+                .small_button("Prev")
+                .on_hover_text("Previous change")
+                .clicked()
             {
-                ui.label(
-                    egui::RichText::new("No changes.")
-                        .small()
-                        .color(GUTTER_TEXT),
-                );
+                let current = self
+                    .active_row()
+                    .and_then(|row| hunk_at(model, row))
+                    .map_or(model.hunks.len() - 1, |index| index.saturating_sub(1));
+                target = Some(model.hunks[current].first_row);
+                ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
             }
+            if ui
+                .small_button("Next")
+                .on_hover_text("Next change")
+                .clicked()
+            {
+                let current = self
+                    .active_row()
+                    .and_then(|row| hunk_at(model, row))
+                    .map_or(0, |index| (index + 1).min(model.hunks.len() - 1));
+                target = Some(model.hunks[current].first_row);
+                ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
+            }
+            let changes = model.hunks.len();
+            ui.label(
+                egui::RichText::new(format!(
+                    "{changes} difference{}",
+                    if changes == 1 { "" } else { "s" }
+                ))
+                .small()
+                .color(DIFF_COUNT),
+            );
+        } else if model.stats.added == 0 && model.stats.removed == 0 && model.notices.is_empty() {
+            ui.label(
+                egui::RichText::new("No changes.")
+                    .small()
+                    .color(GUTTER_TEXT),
+            );
+        }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("Copy", |ui| {
-                    if ui.button("Old version").clicked() {
-                        ui.ctx().copy_text(model.left.text.clone());
-                        ui.close();
-                    }
-                    if ui.button("New version").clicked() {
-                        ui.ctx().copy_text(model.right.text.clone());
-                        ui.close();
-                    }
-                });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("Copy", |ui| {
+                if ui.button("Old version").clicked() {
+                    ui.ctx().copy_text(model.left.text.clone());
+                    ui.close();
+                }
+                if ui.button("New version").clicked() {
+                    ui.ctx().copy_text(model.right.text.clone());
+                    ui.close();
+                }
             });
         });
         if target.is_some() {

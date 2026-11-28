@@ -892,6 +892,9 @@ impl App {
         let mut menu_action: Option<(FileMenuAction, usize)> = None;
         let mut open_dir: Option<PathBuf> = None;
         let mut open_missing_dir: Option<String> = None;
+        // The file menu's Diff is a one-file action. A right click on a row outside
+        // the selection replaces the selection with that row, so it counts as one.
+        let selected_snapshot = self.selected.clone();
         // The spacing the list would put between rows moves inside the row band, so
         // adjacent selected rows paint as one block; the text keeps its distance and so
         // does the total scroll height.
@@ -951,12 +954,20 @@ impl App {
                                     ui.close();
                                 }
                             };
+                            let single_file = !r.is_dir
+                                && if selected_snapshot.contains(&idx) {
+                                    selected_snapshot.len() == 1
+                                } else {
+                                    true
+                                };
                             pick(ui, "Open", FileMenuAction::Open);
                             if !remote {
                                 ui.separator();
                                 pick(ui, "Update", FileMenuAction::Update);
                                 pick(ui, "Commit…", FileMenuAction::Commit);
-                                pick(ui, "Diff", FileMenuAction::Diff);
+                                if single_file {
+                                    pick(ui, "Diff", FileMenuAction::Diff);
+                                }
                                 if !r.is_dir {
                                     pick(ui, "History", FileMenuAction::History);
                                 }
@@ -1161,7 +1172,7 @@ impl App {
                 self.open_commit_dialog(template);
             }
             FileMenuAction::Diff => {
-                self.diff_working_copy();
+                self.diff_selected_file();
             }
             FileMenuAction::History => {
                 let Some(row) = self.rows.get(index) else {
@@ -1184,6 +1195,7 @@ impl App {
                     name,
                     revision,
                     state,
+                    false,
                     false,
                 );
             }
@@ -2277,6 +2289,42 @@ mod tests {
         assert!(
             !labels.iter().any(|label| label == "Edit"),
             "the menu opens files, it does not call the action Edit: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_folder_row_menu_has_no_diff() {
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![row("sub", true)]);
+        app.selected = HashSet::from([0]);
+
+        let menu = open_row_menu(&ctx, &mut app, "sub");
+        let labels: Vec<String> = output_texts(&menu)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+
+        assert!(
+            !labels.iter().any(|label| label == "Diff"),
+            "a folder has no single file to diff: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_selection_menu_has_no_diff() {
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![row("alpha.txt", false), row("beta.txt", false)]);
+        app.selected = HashSet::from([0, 1]);
+
+        let menu = open_row_menu(&ctx, &mut app, "beta.txt");
+        let labels: Vec<String> = output_texts(&menu)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+
+        assert!(
+            !labels.iter().any(|label| label == "Diff"),
+            "Diff compares one file at a time: {labels:?}"
         );
     }
 

@@ -250,7 +250,7 @@ impl CommandRequest {
                 }
             }
             Cmd::Diff => {
-                // Switches come from the Diff settings dialog (P_UnifiedDiff etc).
+                // Switches come from the Preferences diff options (P_UnifiedDiff etc).
             }
             Cmd::WatchOn => args.push("on".into()),
             Cmd::WatchOff => args.push("off".into()),

@@ -17,17 +17,6 @@ use cvsdesk::cvs_client::work::{codec, dir};
 use cvsdesk::sidediff::{count_line_endings, DiffModel, DiffOptions, FileMeta, FileText};
 use cvsdesk::temp::Session;
 
-/// Which two versions the window asked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Target {
-    /// The selected revision against the revision before it.
-    Previous,
-    /// The selected revision against the working file.
-    Working,
-    /// Two revisions the user picked in the list, older on the left.
-    Pair,
-}
-
 /// The largest text file the window will compare. A full checkout still happens,
 /// but the model is told to show "too large" instead of keeping hundreds of MiB in
 /// memory. The limit is about the component, not about disk speed.
@@ -56,13 +45,14 @@ pub(super) enum Msg {
 /// A running pair of reads and the channel that carries the result back.
 pub(super) struct Loader {
     pub(super) rx: Receiver<Msg>,
-    pub(super) revision: String,
-    pub(super) target: Target,
+    /// The pair the worker is reading. A result whose pair no longer matches the
+    /// window belongs to an older selection and is dropped.
+    pub(super) left: Side,
+    pub(super) right: Side,
     cancel: CancelToken,
 }
 
 impl Loader {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn start(
         dir: PathBuf,
         root: String,
@@ -70,14 +60,22 @@ impl Loader {
         file: String,
         left: Side,
         right: Side,
-        revision: String,
-        target: Target,
     ) -> Loader {
         let (tx, rx) = channel();
         let cancel = CancelToken::default();
         let worker_cancel = cancel.clone();
+        let worker_left = left.clone();
+        let worker_right = right.clone();
         std::thread::spawn(move || {
-            let result = load_pair(&dir, &root, &globals, &file, &left, &right, &worker_cancel);
+            let result = load_pair(
+                &dir,
+                &root,
+                &globals,
+                &file,
+                &worker_left,
+                &worker_right,
+                &worker_cancel,
+            );
             let msg = match result {
                 Ok(pair) if !worker_cancel.is_cancelled() => Msg::Ready(Box::new(
                     DiffModel::build(pair.left, pair.right, DiffOptions::default()),
@@ -92,8 +90,8 @@ impl Loader {
         });
         Loader {
             rx,
-            revision,
-            target,
+            left,
+            right,
             cancel,
         }
     }
@@ -150,6 +148,9 @@ fn load_side(
             let path = dir.join(file);
             match std::fs::read(&path) {
                 Ok(bytes) => Ok(bytes),
+                // A deleted working file still has a local version: the empty file.
+                // The diff then shows the base revision with every line removed.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
                 Err(error) => {
                     log::warn!(
                         target: "cvsdesk::diff",
@@ -606,6 +607,26 @@ mod tests {
         assert_eq!(pair.left.text, "a\n\n");
         assert!(pair.left.meta.final_newline);
         assert_eq!(pair.left.meta.line_endings.crlf, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_working_copy_reads_as_an_empty_file() {
+        let dir = scratch("missing-working");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pair = load_pair(
+            &dir,
+            "",
+            &[],
+            "gone.c",
+            &Side::WorkingCopy,
+            &Side::WorkingCopy,
+            &CancelToken::default(),
+        )
+        .expect("a missing local file is an empty version, not an error");
+        assert!(pair.left.text.is_empty());
+        assert!(pair.right.text.is_empty());
+        assert_eq!(pair.left.meta.bytes, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

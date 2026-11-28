@@ -158,7 +158,7 @@ impl App {
                         .map(|row| row.revision.clone())
                         .unwrap_or_else(|| state.working().to_string());
                     let working_state = row.map(|row| row.state).unwrap_or(state.working_state());
-                    self.request_history(dir, root, file, working, working_state, true);
+                    self.request_history(dir, root, file, working, working_state, true, false);
                 }
                 return;
             }

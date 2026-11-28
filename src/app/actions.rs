@@ -231,6 +231,7 @@ impl App {
         working: String,
         working_state: State,
         refresh: bool,
+        open_diff: bool,
     ) {
         if root.trim().is_empty() {
             self.status = "This folder is not a CVS working copy".into();
@@ -271,6 +272,7 @@ impl App {
             working,
             working_state,
             refresh,
+            open_diff,
         });
     }
 
@@ -301,6 +303,54 @@ impl App {
             row.revision.clone(),
             row.state,
             false,
+            false,
+        );
+    }
+
+    /// The file menu's Diff: one local file, read its log, then open the File History
+    /// window with the diff already showing the working revision against the file on
+    /// disk. The dialog is not a command, so the user lands on the comparison at once.
+    pub(super) fn diff_selected_file(&mut self) {
+        if self.selection_is_all_remote() {
+            self.status = "The selected rows are not checked out; check them out first".into();
+            return;
+        }
+        if self.selected.len() != 1 {
+            self.status = "Diff compares one file at a time".into();
+            return;
+        }
+        let Some(&index) = self.selected.iter().next() else {
+            return;
+        };
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        if row.is_dir {
+            self.status = "Diff needs a file, not a folder".into();
+            return;
+        }
+        if row.origin == cvsdesk::entries::Origin::Remote {
+            self.status = "The selected file is not checked out; check it out first".into();
+            return;
+        }
+        if !self
+            .selected_local_names()
+            .iter()
+            .any(|name| name == &row.name)
+        {
+            self.status =
+                "The selected row is hidden by the current filter; clear it or select a visible row"
+                    .into();
+            return;
+        }
+        self.request_history(
+            self.dir.clone(),
+            self.root.clone(),
+            row.name.clone(),
+            row.revision.clone(),
+            row.state,
+            false,
+            true,
         );
     }
 
@@ -492,14 +542,18 @@ impl App {
                         }
                     }
                 } else {
-                    self.open_dialog(Dialog::History(Box::new(HistoryState::new(
+                    let mut state = HistoryState::new(
                         wait.dir,
                         wait.root,
                         wait.file,
                         wait.working,
                         wait.working_state,
                         history,
-                    ))));
+                    );
+                    if wait.open_diff {
+                        state.open_local_diff();
+                    }
+                    self.open_dialog(Dialog::History(Box::new(state)));
                 }
             }
             // Capture the flag before a tag refresh query overwrites it: the create or
