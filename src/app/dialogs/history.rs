@@ -20,6 +20,9 @@ use crate::app::ui::typography::small_monospace;
 use crate::app::version_loader::{Loader, Msg, Side, Target};
 
 const SELECTED_BG: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xF0, 0xFE);
+/// The second revision of a comparison. A different tint keeps it apart from the
+/// primary selection while both stay visible.
+const SECOND_BG: egui::Color32 = egui::Color32::from_rgb(0xEF, 0xF3, 0xE6);
 const HOVER_BG: egui::Color32 = egui::Color32::from_rgb(0xF5, 0xF8, 0xFC);
 const TRUNK: egui::Color32 = egui::Color32::from_rgb(0x40, 0x9E, 0xFF);
 const BRANCH: egui::Color32 = egui::Color32::from_rgb(0x2F, 0x9E, 0x5F);
@@ -60,6 +63,9 @@ pub(crate) struct HistoryState {
     working_state: State,
     history: History,
     selected: Option<usize>,
+    /// The second revision a control click picked. With `selected` it gives the two
+    /// ends the details' Compare button reads.
+    second: Option<usize>,
     filter: String,
     /// The lowercased text each revision is searched by, built once per log refresh.
     haystacks: Vec<String>,
@@ -68,6 +74,9 @@ pub(crate) struct HistoryState {
     branch_filter: BranchFilter,
     diff_target: Target,
     diff_open: bool,
+    /// The two revisions a `Target::Pair` preview reads, older first. Kept so a reload
+    /// repeats the same comparison after the window's state has moved on.
+    pair_revisions: Option<(String, String)>,
     /// Raise each native window once when it opens, then leave the z-order to the user.
     raised: bool,
     diff_raise: bool,
@@ -166,12 +175,14 @@ impl HistoryState {
             working_state,
             history,
             selected,
+            second: None,
             filter: String::new(),
             haystacks,
             tags_expanded: false,
             branch_filter: BranchFilter::All,
             diff_target: Target::Previous,
             diff_open: false,
+            pair_revisions: None,
             raised: false,
             diff_raise: false,
             diff_model: None,
@@ -286,6 +297,8 @@ impl HistoryState {
         self.loading = false;
         self.error.clear();
         self.tags_expanded = false;
+        self.second = None;
+        self.leave_pair();
         self.loader = None;
         self.diff_model = None;
         self.diff_error.clear();
@@ -314,12 +327,79 @@ impl HistoryState {
         }
     }
 
-    fn select(&mut self, index: usize) {
+    /// Apply a click on a revision row. A plain click moves the primary selection; a
+    /// control click (Command on a Mac) picks the second revision the Compare button
+    /// reads, or drops it when the same row is clicked again.
+    fn click(&mut self, index: usize, extend: bool) {
+        if extend {
+            let previous = self.second;
+            if self.selected == Some(index) || self.second == Some(index) {
+                self.second = None;
+            } else {
+                self.second = Some(index);
+            }
+            self.leave_pair();
+            if self.second != previous {
+                self.queue_preview();
+            }
+            return;
+        }
         if self.selected == Some(index) {
+            self.second = None;
             return;
         }
         self.selected = Some(index);
+        self.second = None;
         self.tags_expanded = false;
+        self.leave_pair();
+        self.loader = None;
+        self.diff_model = None;
+        self.diff_error.clear();
+        self.diff_revision.clear();
+        self.queue_preview();
+    }
+
+    /// A changed selection ends a two-revision comparison: the diff window falls back to
+    /// the revision the new row stands for.
+    fn leave_pair(&mut self) {
+        if self.diff_target == Target::Pair {
+            self.diff_target = Target::Previous;
+        }
+        self.pair_revisions = None;
+    }
+
+    /// The two revisions the Compare button reads, older first. `cvs log` lists
+    /// revisions newest first, so the larger row index is the older revision.
+    fn pair(&self) -> Option<(&str, &str)> {
+        let primary = self.selected?;
+        let second = self.second?;
+        if primary == second {
+            return None;
+        }
+        let (older, newer) = if primary > second {
+            (primary, second)
+        } else {
+            (second, primary)
+        };
+        Some((
+            self.history.revisions.get(older)?.revision.as_str(),
+            self.history.revisions.get(newer)?.revision.as_str(),
+        ))
+    }
+
+    /// Show the two picked revisions side by side, opening the diff window if it was
+    /// closed. The window says which two revisions it shows.
+    fn compare_selected(&mut self) {
+        let Some(pair) = self
+            .pair()
+            .map(|(older, newer)| (older.to_string(), newer.to_string()))
+        else {
+            return;
+        };
+        self.pair_revisions = Some(pair);
+        self.diff_target = Target::Pair;
+        self.diff_open = true;
+        self.diff_raise = true;
         self.loader = None;
         self.diff_model = None;
         self.diff_error.clear();
@@ -400,7 +480,7 @@ impl HistoryState {
             return;
         };
         let revision = node.revision.clone();
-        let (left, right) = match self.diff_target {
+        let (left, right, identity) = match self.diff_target {
             Target::Previous => {
                 let Some(previous) = self.history.previous_revision(index) else {
                     self.diff_model = None;
@@ -409,9 +489,27 @@ impl HistoryState {
                     self.diff_revision = revision;
                     return;
                 };
-                (Side::Revision(previous), Side::Revision(revision.clone()))
+                (
+                    Side::Revision(previous),
+                    Side::Revision(revision.clone()),
+                    revision,
+                )
             }
-            Target::Working => (Side::Revision(revision.clone()), Side::WorkingCopy),
+            Target::Working => (
+                Side::Revision(revision.clone()),
+                Side::WorkingCopy,
+                revision,
+            ),
+            Target::Pair => {
+                let Some((older, newer)) = self.pair_revisions.clone() else {
+                    self.diff_model = None;
+                    self.diff_error = "Pick a second revision to compare.".into();
+                    self.diff_loading = false;
+                    return;
+                };
+                let identity = format!("{older}..{newer}");
+                (Side::Revision(older), Side::Revision(newer), identity)
+            }
         };
 
         self.diff_model = None;
@@ -424,7 +522,7 @@ impl HistoryState {
             self.file.clone(),
             left,
             right,
-            revision,
+            identity,
             self.diff_target,
         ));
     }
@@ -449,7 +547,16 @@ impl HistoryState {
             .selected
             .and_then(|index| self.history.revisions.get(index))
             .map(|node| node.revision.as_str());
-        if current != Some(loader.revision.as_str()) || self.diff_target != loader.target {
+        let expected = match self.diff_target {
+            Target::Pair => self
+                .pair_revisions
+                .as_ref()
+                .map(|(older, newer)| format!("{older}..{newer}")),
+            Target::Previous | Target::Working => current.map(str::to_string),
+        };
+        if expected.as_deref() != Some(loader.revision.as_str())
+            || self.diff_target != loader.target
+        {
             return;
         }
 
@@ -500,6 +607,8 @@ impl HistoryState {
     fn ensure_visible(&mut self, visible: &[usize]) {
         if visible.is_empty() {
             self.selected = None;
+            self.second = None;
+            self.leave_pair();
             self.tags_expanded = false;
             self.loader = None;
             self.pending = None;
@@ -513,8 +622,12 @@ impl HistoryState {
             .selected
             .is_none_or(|selected| !visible.contains(&selected))
         {
-            self.select(visible[0]);
+            self.click(visible[0], false);
             self.scroll_to_selected = true;
+        }
+        if self.second.is_some_and(|second| !visible.contains(&second)) {
+            self.second = None;
+            self.leave_pair();
         }
     }
 }
@@ -842,7 +955,8 @@ fn list(ui: &mut egui::Ui, state: &mut HistoryState, visible: &[usize], height: 
                     egui::Sense::click(),
                 );
                 if response.clicked() && !state.demo {
-                    clicked = Some(index);
+                    let extend = ui.input(|input| input.modifiers.ctrl || input.modifiers.command);
+                    clicked = Some((index, extend));
                 }
                 if state.selected == Some(index) && state.scroll_to_selected {
                     state.scroll_to_selected = false;
@@ -852,6 +966,8 @@ fn list(ui: &mut egui::Ui, state: &mut HistoryState, visible: &[usize], height: 
                 let painter = ui.painter_at(rect);
                 if state.selected == Some(index) {
                     painter.rect_filled(rect, 0.0, SELECTED_BG);
+                } else if state.second == Some(index) {
+                    painter.rect_filled(rect, 0.0, SECOND_BG);
                 } else if response.hovered() {
                     painter.rect_filled(rect, 0.0, HOVER_BG);
                 }
@@ -933,8 +1049,8 @@ fn list(ui: &mut egui::Ui, state: &mut HistoryState, visible: &[usize], height: 
             }
         });
 
-    if let Some(index) = clicked {
-        state.select(index);
+    if let Some((index, extend)) = clicked {
+        state.click(index, extend);
     }
 }
 
@@ -1200,11 +1316,18 @@ fn details(ui: &mut egui::Ui, state: &mut HistoryState) {
         });
 
     ui.separator();
+    let compare_label = state
+        .pair()
+        .map(|(older, newer)| format!("Compare {older} → {newer}"));
     ui.horizontal_wrapped(|ui| {
         if ui.button("Copy revision").clicked() {
             ui.ctx().copy_text(node.revision.clone());
         }
-        if ui.button("Diff…").clicked() {
+        if let Some(label) = compare_label {
+            if ui.button(label).clicked() {
+                state.compare_selected();
+            }
+        } else if ui.button("Diff…").clicked() {
             state.set_diff_open(true);
         }
     });
@@ -1212,6 +1335,12 @@ fn details(ui: &mut egui::Ui, state: &mut HistoryState) {
 
 fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
     ui.horizontal(|ui| {
+        if state.diff_target == Target::Pair {
+            if let Some((older, newer)) = &state.pair_revisions {
+                ui.label(egui::RichText::new(format!("{older} → {newer}")).strong());
+            }
+            ui.separator();
+        }
         let previous_on = state.diff_target == Target::Previous;
         if ui.selectable_label(previous_on, "This revision").clicked() {
             state.set_target(Target::Previous);
@@ -1233,7 +1362,8 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
             }
             if let Some(index) = state.selected {
                 if let Some(node) = state.history.revisions.get(index) {
-                    if !state.diff_revision.is_empty()
+                    if state.diff_target != Target::Pair
+                        && !state.diff_revision.is_empty()
                         && state.diff_revision != node.revision
                         && !state.diff_loading
                     {
@@ -1338,7 +1468,27 @@ mod tests {
             |ui| toolbar(ui, state, &mut action),
         );
         output.textures_delta.clear();
+        shape_texts(&output)
+    }
 
+    fn details_texts(state: &mut HistoryState) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(620.0, 460.0),
+                )),
+                ..Default::default()
+            },
+            |ui| details(ui, state),
+        );
+        output.textures_delta.clear();
+        shape_texts(&output)
+    }
+
+    fn shape_texts(output: &egui::FullOutput) -> Vec<String> {
         fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
             match shape {
                 egui::Shape::Text(text) => out.push(text.galley.text().to_string()),
@@ -1355,6 +1505,81 @@ mod tests {
             walk(&clipped.shape, &mut texts);
         }
         texts
+    }
+
+    fn index_of(state: &HistoryState, revision: &str) -> usize {
+        state
+            .history
+            .revisions
+            .iter()
+            .position(|node| node.revision == revision)
+            .expect("the sample log lists every revision")
+    }
+
+    #[test]
+    fn a_plain_click_drops_the_second_revision() {
+        let mut state = sample();
+        let older = index_of(&state, "1.2");
+        let another = index_of(&state, "1.3");
+        state.click(older, true);
+        assert_eq!(state.second, Some(older), "the control click picks it");
+
+        state.click(another, false);
+
+        assert_eq!(state.selected, Some(another));
+        assert_eq!(state.second, None, "one row is one revision again");
+    }
+
+    #[test]
+    fn a_control_click_keeps_the_first_revision_and_picks_the_second() {
+        let mut state = sample();
+        let first = state.selected.expect("the working revision is selected");
+        let older = index_of(&state, "1.2");
+
+        state.click(older, true);
+
+        assert_eq!(state.selected, Some(first), "the first stays the anchor");
+        assert_eq!(state.second, Some(older));
+    }
+
+    #[test]
+    fn the_comparison_runs_from_the_older_revision_to_the_newer() {
+        let mut state = sample();
+        let older = index_of(&state, "1.2");
+        let newer = index_of(&state, "1.4");
+        state.click(newer, false);
+        state.click(older, true);
+
+        assert_eq!(
+            state.pair(),
+            Some(("1.2", "1.4")),
+            "the log lists revisions newest first, so the larger row is older"
+        );
+    }
+
+    #[test]
+    fn the_details_offer_the_comparison_once_two_revisions_are_picked() {
+        let mut state = sample();
+        let older = index_of(&state, "1.2");
+        state.click(older, true);
+
+        let texts = details_texts(&mut state);
+
+        assert!(
+            texts.iter().any(|text| text == "Compare 1.2 → 1.4"),
+            "the button names both ends of the comparison: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_details_keep_the_plain_diff_for_one_revision() {
+        let mut state = sample();
+        let texts = details_texts(&mut state);
+
+        assert!(
+            texts.iter().any(|text| text == "Diff…"),
+            "one revision still opens the plain diff: {texts:?}"
+        );
     }
 
     #[test]
@@ -1498,7 +1723,7 @@ mod tests {
             .position(|node| node.revision == "1.3")
             .expect("the sample has 1.3");
 
-        state.select(index);
+        state.click(index, false);
 
         assert_eq!(state.selected, Some(index));
         assert!(state.pending.is_none(), "a closed diff runs nothing");
@@ -1535,7 +1760,7 @@ mod tests {
             .iter()
             .position(|node| node.revision == "1.3")
             .expect("the sample has 1.3");
-        state.select(index);
+        state.click(index, false);
 
         assert_eq!(state.selected, Some(index));
         assert!(
@@ -1659,7 +1884,7 @@ mod tests {
             .position(|node| node.revision == "1.3")
             .expect("the sample has 1.3");
 
-        state.select(index);
+        state.click(index, false);
 
         assert!(!state.tags_expanded, "the next revision starts compact");
     }

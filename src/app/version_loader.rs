@@ -24,6 +24,8 @@ pub(super) enum Target {
     Previous,
     /// The selected revision against the working file.
     Working,
+    /// Two revisions the user picked in the list, older on the left.
+    Pair,
 }
 
 /// The largest text file the window will compare. A full checkout still happens,
