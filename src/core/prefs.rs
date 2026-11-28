@@ -232,8 +232,14 @@ impl Prefs {
     /// Put every known setting into `table`, leaving keys from another version alone.
     fn write_into(&self, table: &mut Table) {
         let text = |value: &str| Value::String(value.to_string());
-        table.insert("P_Cvsroot".into(), text(&self.cvsroot));
-        table.insert("P_OldCvsroots".into(), string_array(&self.recent_roots));
+        table.insert(
+            "P_Cvsroot".into(),
+            text(&crate::entries::redact_root_password(&self.cvsroot)),
+        );
+        table.insert(
+            "P_OldCvsroots".into(),
+            string_array(&self.cleaned_recent_roots()),
+        );
         table.insert("P_ConnKind".into(), text(self.kind.token()));
         table.insert("P_User".into(), text(&self.user));
         table.insert("P_Host".into(), text(&self.host));
@@ -349,9 +355,18 @@ impl Prefs {
         }
         let root = crate::client::root::Root::parse(root)
             .map(|root| root.key)
-            .unwrap_or_else(|_| root.to_string());
+            .unwrap_or_else(|_| crate::entries::redact_root_password(root));
         self.cvsroot = root.clone();
         Prefs::remember(&mut self.recent_roots, &root);
+    }
+
+    /// The recent roots without a password, for writing into the settings file.
+    fn cleaned_recent_roots(&self) -> Vec<String> {
+        self.recent_roots
+            .iter()
+            .map(|root| crate::entries::redact_root_password(root))
+            .filter(|root| !root.trim().is_empty())
+            .collect()
     }
 
     /// Write just the root keys into the settings file, keeping every other key as it
@@ -361,8 +376,14 @@ impl Prefs {
             return Ok(());
         }
         update_settings(|table| {
-            table.insert("P_Cvsroot".into(), Value::String(self.cvsroot.clone()));
-            table.insert("P_OldCvsroots".into(), string_array(&self.recent_roots));
+            table.insert(
+                "P_Cvsroot".into(),
+                Value::String(crate::entries::redact_root_password(&self.cvsroot)),
+            );
+            table.insert(
+                "P_OldCvsroots".into(),
+                string_array(&self.cleaned_recent_roots()),
+            );
         })
     }
 
@@ -472,7 +493,19 @@ impl Prefs {
                 Vec::new()
             }
         });
+        p.scrub_roots();
         p
+    }
+
+    /// Remove a password that an older settings file may carry in a root.
+    fn scrub_roots(&mut self) {
+        self.cvsroot = crate::entries::redact_root_password(&self.cvsroot);
+        self.recent_roots = self
+            .recent_roots
+            .iter()
+            .map(|root| crate::entries::redact_root_password(root))
+            .filter(|root| !root.trim().is_empty())
+            .collect();
     }
 
     /// Parse the older `NAME = value` text, so a file written before the TOML format
@@ -559,6 +592,7 @@ impl Prefs {
                 Vec::new()
             }
         });
+        p.scrub_roots();
         p
     }
 
@@ -1069,6 +1103,30 @@ mod tests {
         p.remember_root(":pserver:ann:secret@host:/repo");
         assert_eq!(p.cvsroot, ":pserver:ann@host:/repo");
         assert_eq!(p.recent_roots, vec![":pserver:ann@host:/repo"]);
+    }
+
+    #[test]
+    fn a_saved_root_password_is_scrubbed_when_settings_load() {
+        let toml = "P_Cvsroot = \":pserver:ann:secret@host:/repo\"\nP_OldCvsroots = [\":pserver:bob:secret@host:/repo\"]\n";
+        let p = Prefs::from_toml(toml).expect("toml");
+        assert_eq!(p.cvsroot, ":pserver:ann@host:/repo");
+        assert_eq!(p.recent_roots, vec![":pserver:bob@host:/repo"]);
+
+        let legacy = "P_Cvsroot = :pserver:ann:secret@host:/repo\n\
+                      P_OldCvsroots = :pserver:bob:secret@host:/repo\n";
+        let p = Prefs::from_legacy_text(legacy);
+        assert_eq!(p.cvsroot, ":pserver:ann@host:/repo");
+        assert_eq!(p.recent_roots, vec![":pserver:bob@host:/repo"]);
+    }
+
+    #[test]
+    fn a_settings_file_never_writes_a_root_password() {
+        let mut p = Prefs::default();
+        p.cvsroot = ":pserver:ann:secret@host:/repo".into();
+        p.recent_roots = vec![":pserver:bob:secret@host:/repo".into()];
+        let text = p.to_toml();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains(":pserver:ann@host:/repo"));
     }
 
     #[test]

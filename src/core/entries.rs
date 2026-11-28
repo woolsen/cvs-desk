@@ -648,6 +648,51 @@ pub fn build_cvsroot(
     s
 }
 
+/// Remove a password from a CVSROOT even when the rest of the root is malformed, so an
+/// error message or a settings file can never carry one. The text around the password is
+/// left exactly as it was.
+pub fn redact_root_password(raw: &str) -> String {
+    let raw = raw.trim();
+    let Some(stripped) = raw.strip_prefix(':') else {
+        return raw.to_string();
+    };
+    let Some(method_end) = stripped.find(':') else {
+        return raw.to_string();
+    };
+    let rest_start = method_end + 2;
+    let rest = &raw[rest_start..];
+    // A proxy is written before the userinfo; keep it as it is and redact only the
+    // account part that follows.
+    let (prefix, rest) = match rest.strip_prefix("proxy=") {
+        Some(after) => {
+            let Some(host_end) = after.find(':') else {
+                return raw.to_string();
+            };
+            let Some(port_end) = after[host_end + 1..].find(':') else {
+                return raw.to_string();
+            };
+            let end = "proxy=".len() + host_end + 1 + port_end + 1;
+            (&rest[..end], &rest[end..])
+        }
+        None => ("", rest),
+    };
+    let path_start = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..path_start].rfind('@') else {
+        return raw.to_string();
+    };
+    let info = &rest[..at];
+    let Some(colon) = info.find(':') else {
+        return raw.to_string();
+    };
+    format!(
+        "{}{}{}{}",
+        &raw[..rest_start],
+        prefix,
+        &rest[..colon],
+        &rest[at..]
+    )
+}
+
 /// Pull the pieces of an existing CVSROOT string back out, so the dialog can show them.
 /// A password in the userinfo is not returned with the user: it must never be shown.
 pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
@@ -684,30 +729,30 @@ pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
     }
     // A proxy is written before the userinfo: `proxy=HOST:PORT:user@host[:port]:path`.
     rest = strip_proxy(rest);
-    // The path starts after the last colon of `user[:password]@host[:port]:path`. A root
-    // written without that colon still has a slash before its path.
-    let (info, path) = match rest.rfind(':') {
-        Some(at) => (&rest[..at], &rest[at + 1..]),
-        None => match rest.find('/') {
-            Some(at) => (&rest[..at], &rest[at..]),
-            None => (rest, ""),
-        },
-    };
-    let (auth, hostport) = match info.rfind('@') {
-        Some(at) => (&info[..at], &info[at + 1..]),
-        None => ("", info),
+    // The userinfo ends at the first slash. A Windows path may have no slash, so the host
+    // splitter below finds the path after the host.
+    let path_start = rest.find('/').unwrap_or(rest.len());
+    let (userinfo, host_start) = match rest[..path_start].rfind('@') {
+        Some(at) => (&rest[..at], at + 1),
+        None => ("", 0),
     };
     // The userinfo may carry a password as `user:password`; only the account is shown.
-    let user = auth.split(':').next().unwrap_or("").trim();
-    let (host, port) = match hostport.rfind(':') {
-        Some(at) => (&hostport[..at], &hostport[at + 1..]),
-        None => (hostport, ""),
+    let user = userinfo.split(':').next().unwrap_or("").trim();
+    let host_part = &rest[host_start..];
+    let Some((host, port, path)) = crate::client::root::split_host_path(host_part) else {
+        return (
+            kind,
+            user.to_string(),
+            host_part.to_string(),
+            String::new(),
+            String::new(),
+        );
     };
     (
         kind,
         user.to_string(),
         host.to_string(),
-        port.to_string(),
+        port.unwrap_or("").to_string(),
         path.to_string(),
     )
 }
@@ -939,6 +984,37 @@ mod tests {
         assert_eq!(host, "cvshost");
         assert_eq!(port, "2402");
         assert_eq!(path, "/repo");
+    }
+
+    #[test]
+    fn a_path_may_contain_a_colon() {
+        let (kind, user, host, port, path) = parse_cvsroot(":ext:ann@buildhost:C:\\cvs\\repo");
+        assert_eq!(kind, ConnKind::Ext);
+        assert_eq!(user, "ann");
+        assert_eq!(host, "buildhost");
+        assert!(port.is_empty());
+        assert_eq!(path, "C:\\cvs\\repo");
+    }
+
+    #[test]
+    fn a_malformed_root_password_is_still_redacted() {
+        assert_eq!(
+            redact_root_password(":pserver:ann:secret@host"),
+            ":pserver:ann@host"
+        );
+        assert_eq!(
+            redact_root_password(":pserver:ann:secret@host:abc:/repo"),
+            ":pserver:ann@host:abc:/repo"
+        );
+        assert_eq!(
+            redact_root_password(":pserver:proxy=proxyhost:8080:ann:secret@host:/repo"),
+            ":pserver:proxy=proxyhost:8080:ann@host:/repo"
+        );
+        assert_eq!(
+            redact_root_password(":pserver:ann@host:/repo"),
+            ":pserver:ann@host:/repo"
+        );
+        assert_eq!(redact_root_password("C:\\work"), "C:\\work");
     }
 
     #[test]

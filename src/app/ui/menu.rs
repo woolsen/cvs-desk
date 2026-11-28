@@ -28,9 +28,12 @@ impl App {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Checkout…").clicked() {
+                    let checkout = ui
+                        .add_enabled(!self.runner.running, egui::Button::new("Checkout…"))
+                        .on_disabled_hover_text("Stop the running cvs command first");
+                    if checkout.clicked() {
                         let mut state = crate::app::dialogs::checkout::CheckoutDialog::new(
-                            "HEAD",
+                            "",
                             self.prefs.checkout_ro,
                             self.default_connection(),
                         );
@@ -40,7 +43,10 @@ impl App {
                         self.open_dialog(Dialog::Checkout(Box::new(state)));
                         ui.close();
                     }
-                    if ui.button("Import…").clicked() {
+                    let import = ui
+                        .add_enabled(!self.runner.running, egui::Button::new("Import…"))
+                        .on_disabled_hover_text("Stop the running cvs command first");
+                    if import.clicked() {
                         self.open_dialog(Dialog::Import {
                             vendor: String::new(),
                             release: String::new(),
@@ -50,7 +56,10 @@ impl App {
                         });
                         ui.close();
                     }
-                    if ui.button("Init").clicked() {
+                    let init = ui
+                        .add_enabled(!self.runner.running, egui::Button::new("Init"))
+                        .on_disabled_hover_text("Stop the running cvs command first");
+                    if init.clicked() {
                         let mut req = CommandRequest::new(Cmd::Init);
                         req.files.clear();
                         self.start(req, OutputKind::Console);
@@ -320,14 +329,20 @@ impl App {
                 });
 
                 ui.menu_button("Tools", |ui| {
-                    if ui.button("Login…").clicked() {
+                    let login = ui
+                        .add_enabled(!self.runner.running, egui::Button::new("Login…"))
+                        .on_disabled_hover_text("Stop the running cvs command first");
+                    if login.clicked() {
                         self.open_dialog(Dialog::Login {
                             password: String::new(),
                             root: self.default_connection(),
                         });
                         ui.close();
                     }
-                    if ui.button("Logout").clicked() {
+                    let logout = ui
+                        .add_enabled(!self.runner.running, egui::Button::new("Logout"))
+                        .on_disabled_hover_text("Stop the running cvs command first");
+                    if logout.clicked() {
                         self.cvs_command(Cmd::Logout);
                         ui.close();
                     }

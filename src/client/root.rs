@@ -318,7 +318,7 @@ fn default_port(method: &Method) -> u16 {
 ///
 /// The path may itself contain a colon (a Windows drive), so a colon followed by digits and
 /// then another colon is read as a port; any other colon starts the path.
-fn split_host_path(text: &str) -> Option<(&str, Option<&str>, &str)> {
+pub(crate) fn split_host_path(text: &str) -> Option<(&str, Option<&str>, &str)> {
     let mut i = if text.starts_with('[') {
         text.find(']')? + 1
     } else {

@@ -14,7 +14,7 @@ pub(super) fn split_root(raw: &str) -> (String, Option<String>) {
                 .flatten();
             (root.key, password)
         }
-        Err(_) => (raw.to_string(), None),
+        Err(_) => (cvsdesk::entries::redact_root_password(raw), None),
     }
 }
 
@@ -38,6 +38,15 @@ pub(super) fn is_pserver(root: &str) -> bool {
     match Root::parse(root) {
         Ok(root) => matches!(root.method, Method::Pserver),
         Err(_) => root.starts_with(":pserver:"),
+    }
+}
+
+/// Whether the root text itself carries a password, even when the rest is malformed.
+pub(super) fn has_password(root: &str) -> bool {
+    let root = root.trim();
+    match Root::parse(root) {
+        Ok(root) => root.password.is_some(),
+        Err(_) => cvsdesk::entries::redact_root_password(root) != root,
     }
 }
 
@@ -78,6 +87,15 @@ mod tests {
         let (root, password) = split_root(":ext:ann:secret@host:/repo");
         assert_eq!(root, ":ext:ann@host:/repo");
         assert_eq!(password, None);
+    }
+
+    #[test]
+    fn a_malformed_root_password_is_redacted_before_a_command() {
+        let (root, password) = split_root(":pserver:ann:secret@host");
+        assert_eq!(root, ":pserver:ann@host");
+        assert_eq!(password, None);
+        assert!(has_password(":pserver:ann:secret@host"));
+        assert!(!has_password(":pserver:ann@host:/repo"));
     }
 
     #[test]

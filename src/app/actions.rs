@@ -507,13 +507,18 @@ impl App {
             // Capture the finished command's own flags before a follow-up command (a login
             // that resumes a checkout, or a tag query) replaces them.
             let refresh = std::mem::take(&mut self.refresh_after_command);
+            let elapsed = self
+                .run_started
+                .take()
+                .map(|started| started.elapsed().as_millis())
+                .unwrap_or(0);
             let login_purpose = self.login_purpose.take();
             let module_list = std::mem::take(&mut self.module_list_waiting);
             let checkout_dir = self.checkout_waiting.take();
             let mut moved = false;
             let mut checkout_failed = false;
             if let Some(purpose) = login_purpose {
-                let ok = exit_code == Some(0);
+                let ok = exit_code == Some(0) && !stopped;
                 match purpose {
                     LoginPurpose::Checkout => {
                         if ok {
@@ -530,12 +535,34 @@ impl App {
                                 }
                             }
                         } else {
-                            let message = first_error(&self.captured);
+                            let message = if stopped {
+                                "Stopped.".to_string()
+                            } else {
+                                command_error(&self.captured)
+                            };
+                            let lower = message.to_ascii_lowercase();
+                            let save_failure = lower.contains("home directory")
+                                || lower.contains("cvspass")
+                                || lower.contains("permission denied")
+                                || lower.contains("access is denied");
                             if let Some(pending) = self.pending_checkout.take() {
-                                checkout::reopen(self, pending, format!("Login failed: {message}"));
+                                let warning = if stopped {
+                                    "Login stopped. The checkout has not run.".to_string()
+                                } else if save_failure {
+                                    format!(
+                                        "The server accepted the password, but cvs could not save it in .cvspass. Check that your home folder is writable, then try again. ({message})"
+                                    )
+                                } else {
+                                    format!("Login failed: {message}")
+                                };
+                                checkout::reopen(self, pending, warning);
                             }
                             checkout_failed = true;
-                            self.status = "Login failed — see the Checkout window".into();
+                            self.status = if stopped {
+                                "Login stopped".into()
+                            } else {
+                                "Login failed — see the Checkout window".into()
+                            };
                         }
                     }
                     LoginPurpose::Modules { root } => {
@@ -547,9 +574,22 @@ impl App {
                                 );
                             }
                         } else {
-                            let message = first_error(&self.captured);
-                            checkout::warn_dialog(self, format!("Login failed: {message}"));
-                            self.status = "Login failed — see the Checkout window".into();
+                            let message = if stopped {
+                                "Stopped.".to_string()
+                            } else {
+                                command_error(&self.captured)
+                            };
+                            let warning = if stopped {
+                                "Login stopped. The module list has not run.".to_string()
+                            } else {
+                                format!("Login failed: {message}")
+                            };
+                            checkout::warn_dialog(self, warning);
+                            self.status = if stopped {
+                                "Login stopped".into()
+                            } else {
+                                "Login failed — see the Checkout window".into()
+                            };
                         }
                     }
                 }
@@ -579,30 +619,44 @@ impl App {
                     moved = true;
                 } else {
                     checkout_failed = true;
-                    let message = first_error(&self.captured);
+                    let message = if stopped {
+                        "Stopped.".to_string()
+                    } else {
+                        command_error(&self.captured)
+                    };
                     if let Some(pending) = self.pending_checkout.take() {
                         let lower = message.to_ascii_lowercase();
                         let needs_password = lower.contains("no saved password")
                             || lower.contains("authorization failed")
                             || lower.contains("authentication failed");
-                        let warning = if needs_password {
+                        let warning = if stopped {
+                            "Checkout stopped. The folder may be partial; click Checkout to retry."
+                                .to_string()
+                        } else if needs_password {
                             format!(
-                                "No saved password for this root. Enter the password above, or use Tools → Login. ({message})"
+                                "No saved password for this root. Enter the password above and click Checkout again. ({message})"
                             )
                         } else {
                             format!("Checkout failed: {message}")
                         };
                         checkout::reopen(self, pending, warning);
-                        self.status = "Checkout failed — see the Checkout window".into();
+                        self.status = if stopped {
+                            "Checkout stopped".into()
+                        } else {
+                            "Checkout failed — see the Checkout window".into()
+                        };
                     }
                 }
             }
             if module_list {
-                let message = first_error(&self.captured);
-                if exit_code == Some(0) {
+                if stopped {
+                    checkout::warn_dialog(self, "Module list stopped.");
+                    self.status = "Module list stopped".into();
+                } else if exit_code == Some(0) {
                     checkout::warn_dialog(self, "");
                     self.status = "Module list is in the Console".into();
                 } else {
+                    let message = command_error(&self.captured);
                     checkout::warn_dialog(self, format!("Could not list modules: {message}"));
                     self.status = "Could not list modules — see the Console".into();
                 }
@@ -736,11 +790,6 @@ impl App {
                 self.output = OutputKind::State;
                 self.refresh_state_sheet();
             }
-            let elapsed = self
-                .run_started
-                .take()
-                .map(|started| started.elapsed().as_millis())
-                .unwrap_or(0);
             log::info!(
                 target: "cvsdesk::command",
                 "id={} phase=end code={} elapsed_ms={} lines={} stopped={}",
@@ -766,10 +815,13 @@ impl App {
         let was_history = self.history_waiting.is_some();
         self.history_waiting = None;
         self.tag_waiting = None;
-        self.checkout_waiting = None;
-        self.pending_checkout = None;
-        self.login_purpose = None;
-        self.module_list_waiting = false;
+        if !was_running {
+            // Nothing will report a result, so no follow-up can use these.
+            self.checkout_waiting = None;
+            self.pending_checkout = None;
+            self.login_purpose = None;
+            self.module_list_waiting = false;
+        }
         if let Some(Dialog::Tags(state)) = self.dialog.as_mut() {
             state.loading = false;
             state.status = "Stopped.".into();
@@ -1120,4 +1172,62 @@ fn first_error(lines: &[String]) -> String {
         .find(|line| !line.trim().is_empty())
         .cloned()
         .unwrap_or_else(|| "cvs failed".to_string())
+}
+
+/// The line a person should read when a command fails. A login greets the reader before
+/// it fails, and a checkout prints progress first, so the first non-empty line is often
+/// not the error.
+fn command_error(lines: &[String]) -> String {
+    lines
+        .iter()
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("aborted")
+                || lower.contains("failed")
+                || lower.contains("refused")
+                || lower.contains("cannot")
+                || lower.contains("could not")
+                || lower.contains("no saved password")
+                || lower.contains("not installed")
+                || lower.contains("permission denied")
+                || lower.contains("access is denied")
+        })
+        .or_else(|| lines.iter().rev().find(|line| !line.trim().is_empty()))
+        .cloned()
+        .unwrap_or_else(|| "cvs failed".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_login_error_is_not_the_greeting() {
+        let lines = vec![
+            "Logging in to :pserver:ann@host:/repo".to_string(),
+            "cvs [login aborted]: authorization failed".to_string(),
+        ];
+        assert_eq!(
+            command_error(&lines),
+            "cvs [login aborted]: authorization failed"
+        );
+    }
+
+    #[test]
+    fn a_checkout_progress_line_is_not_the_error() {
+        let lines = vec![
+            "cvs server: Updating error_module".to_string(),
+            "cvs [checkout aborted]: cannot find module".to_string(),
+        ];
+        assert_eq!(
+            command_error(&lines),
+            "cvs [checkout aborted]: cannot find module"
+        );
+    }
+
+    #[test]
+    fn without_a_keyword_the_last_line_is_the_best_guess() {
+        let lines = vec!["one".to_string(), "the last".to_string()];
+        assert_eq!(command_error(&lines), "the last");
+    }
 }

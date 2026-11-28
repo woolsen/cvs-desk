@@ -1067,6 +1067,9 @@ fn a_finished_checkout_opens_the_folder_it_created() {
 
     let mut app = app_with_rows(Vec::new());
     app.dir = base.clone();
+    let mut dialog = CheckoutDialog::new("", false, ":pserver:ann@host:/repo".into());
+    dialog.module = "proj".into();
+    app.pending_checkout = Some(checkout::pending_for_test(dialog, &base));
     app.checkout_waiting = Some(target.clone());
     let (tx, rx) = channel();
     app.rx = Some(rx);
@@ -1078,6 +1081,11 @@ fn a_finished_checkout_opens_the_folder_it_created() {
         "a successful checkout shows what it created"
     );
     assert!(app.checkout_waiting.is_none());
+    assert!(app.pending_checkout.is_none());
+    assert!(
+        app.last_checkout.is_some(),
+        "the fields are offered again next time"
+    );
     assert!(app.loading.is_some(), "the new folder is read");
 
     let _ = fs::remove_dir_all(&base);
@@ -1169,6 +1177,10 @@ fn a_successful_login_starts_the_pending_checkout() {
     );
     assert!(app.pending_checkout.is_some());
     assert!(app.login_purpose.is_none());
+    assert!(
+        app.loading.is_none(),
+        "the login must not re-read the folder"
+    );
     app.stop();
     let _ = fs::remove_dir_all(&base);
 }
@@ -1202,7 +1214,71 @@ fn a_successful_login_starts_the_module_list() {
         matches!(app.dialog, Some(Dialog::Checkout(_))),
         "the module list must leave the Checkout window open"
     );
+    assert!(
+        app.loading.is_none(),
+        "the login must not re-read the folder"
+    );
     app.stop();
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_stopped_checkout_returns_with_its_fields() {
+    let base = std::env::temp_dir().join(format!("cvsdesk-checkout-stop-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    app.has_cvs = false;
+    let mut dialog = CheckoutDialog::new("", false, ":pserver:ann@host:/repo".into());
+    dialog.module = "proj".into();
+    app.pending_checkout = Some(checkout::pending_for_test(dialog, &base));
+    app.checkout_waiting = Some(base.join("proj"));
+    app.runner.running = true;
+    app.stop();
+
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Done(1)).unwrap();
+    app.poll();
+
+    let Some(Dialog::Checkout(state)) = app.dialog.as_ref() else {
+        panic!("a stopped checkout must come back with its fields");
+    };
+    assert!(state.warning.contains("stopped"), "{}", state.warning);
+    assert!(app.pending_checkout.is_none());
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_stopped_login_returns_to_the_checkout_window() {
+    let base = std::env::temp_dir().join(format!(
+        "cvsdesk-checkout-login-stop-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&base).unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    app.has_cvs = false;
+    let mut dialog = CheckoutDialog::new("", false, ":pserver:ann@host:/repo".into());
+    dialog.module = "proj".into();
+    app.pending_checkout = Some(checkout::pending_for_test(dialog, &base));
+    app.login_purpose = Some(LoginPurpose::Checkout);
+    app.runner.running = true;
+    app.stop();
+
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Done(1)).unwrap();
+    app.poll();
+
+    let Some(Dialog::Checkout(state)) = app.dialog.as_ref() else {
+        panic!("a stopped login must come back with the checkout fields");
+    };
+    assert!(state.warning.contains("Login stopped"), "{}", state.warning);
+
     let _ = fs::remove_dir_all(&base);
 }
 
