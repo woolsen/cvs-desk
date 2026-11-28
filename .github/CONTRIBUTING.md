@@ -14,6 +14,8 @@ Open an issue with:
 Do not include real CVS account names, host names, passwords, `.cvspass` contents, or
 `CVS/Root` files from a private repository.
 
+Security problems are not handled in public issues. See [SECURITY.md](../SECURITY.md).
+
 ## Code contributions
 
 Code contributions require a signed contributor license agreement. The agreement grants the
