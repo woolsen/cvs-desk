@@ -26,7 +26,12 @@ impl App {
     /// Start one command in `dir` instead of the folder the window is showing. File
     /// History keeps the folder it was opened from, so browsing elsewhere must not
     /// change where its refresh or diff preview runs.
-    fn start_in(&mut self, dir: PathBuf, mut req: CommandRequest, kind: OutputKind) -> bool {
+    pub(super) fn start_in(
+        &mut self,
+        dir: PathBuf,
+        mut req: CommandRequest,
+        kind: OutputKind,
+    ) -> bool {
         if self.runner.running {
             log::debug!(
                 target: "cvsdesk::command",

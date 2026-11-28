@@ -21,6 +21,9 @@ pub(super) enum Dialog {
         tag: String,
         readonly: bool,
         module: String,
+        /// The folder cvs writes the working copy into. Empty means the module's name
+        /// under the folder the window shows.
+        folder: String,
         root: String,
     },
     Import {
@@ -92,8 +95,9 @@ impl App {
                     tag,
                     readonly,
                     module,
+                    folder,
                     root,
-                } => checkout::show(ctx, tag, readonly, module, root, &recent_roots),
+                } => checkout::show(ctx, tag, readonly, module, folder, root, &recent_roots),
                 Dialog::Import {
                     vendor,
                     release,

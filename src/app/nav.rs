@@ -222,7 +222,7 @@ fn folder_for(base: &Path, text: &str) -> Option<PathBuf> {
 
 /// Removes `.` and resolves `..` without touching the disk, so a typed
 /// `D:\a\b\..\c` is shown as `D:\a\c` instead of keeping the `..` around.
-fn normalize(path: &Path) -> PathBuf {
+pub(super) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {

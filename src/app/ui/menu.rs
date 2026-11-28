@@ -33,6 +33,7 @@ impl App {
                             tag: "HEAD".into(),
                             readonly: self.prefs.checkout_ro,
                             module: String::new(),
+                            folder: String::new(),
                             root: self.default_connection(),
                         });
                         ui.close();
