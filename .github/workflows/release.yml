@@ -59,13 +59,11 @@ jobs:
       - name: Add the bundled font licence
         shell: pwsh
         run: |
-          Add-Content third-party-licenses.txt @"
-
---------------------------------------------------------------------------------
-JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf)
---------------------------------------------------------------------------------
-
-"@
+          Add-Content third-party-licenses.txt ""
+          Add-Content third-party-licenses.txt ("-" * 80)
+          Add-Content third-party-licenses.txt "JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf)"
+          Add-Content third-party-licenses.txt ("-" * 80)
+          Add-Content third-party-licenses.txt ""
           Add-Content third-party-licenses.txt (Get-Content assets/fonts/OFL.txt -Raw)
 
       - name: Check the license notices
