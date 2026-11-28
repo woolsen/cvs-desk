@@ -11,6 +11,7 @@ use cvsdesk::demo;
 use cvsdesk::entries::{self, Row, State};
 use cvsdesk::prefs::Prefs;
 
+use crate::app::dialogs::checkout::{CheckoutMemory, PendingCheckout};
 use crate::app::dialogs::history::HistoryState;
 use crate::app::dialogs::tags::TagsState;
 use crate::app::dialogs::Dialog;
@@ -79,6 +80,13 @@ pub(super) enum TagWait {
     Query,
     /// A create or delete command: when it ends, read the tags again.
     AfterWrite,
+}
+
+/// Why a login command is running: a checkout waiting for its password, or a module list.
+#[derive(Clone, Debug)]
+pub(super) enum LoginPurpose {
+    Checkout,
+    Modules { root: String },
 }
 
 /// The file whose log reply will fill the File History window.
@@ -195,6 +203,14 @@ pub(crate) struct App {
     /// The folder a checkout is expected to create. cvs succeeds, it is shown; any
     /// other command clears it, so an old value can never open the wrong folder.
     checkout_waiting: Option<PathBuf>,
+    /// A checkout waiting for its login, or for a retry after a failure.
+    pending_checkout: Option<PendingCheckout>,
+    /// The login command that will resume a checkout or a module list.
+    login_purpose: Option<LoginPurpose>,
+    /// A `checkout -c` reply is expected in the Console.
+    module_list_waiting: bool,
+    /// The fields of the last successful checkout, offered again for the same root.
+    last_checkout: Option<CheckoutMemory>,
     pending: Vec<String>,
     captured: Vec<String>,
     /// The last finished reply of each pane that keeps one. Switching tabs shows what
@@ -358,6 +374,10 @@ impl App {
             refresh_in_place: false,
             refresh_after_command: false,
             checkout_waiting: None,
+            pending_checkout: None,
+            login_purpose: None,
+            module_list_waiting: false,
+            last_checkout: None,
             pending: Vec::new(),
             captured: Vec::new(),
             pane_output: HashMap::new(),

@@ -340,14 +340,18 @@ impl Prefs {
     }
 
     /// Remember a root the user just used. The newest stays first, without duplicates,
-    /// and `cvsroot` keeps naming the last one for older settings readers.
+    /// and `cvsroot` keeps naming the last one for older settings readers. A password
+    /// written into the userinfo is dropped first: settings must never carry one.
     pub fn remember_root(&mut self, root: &str) {
         let root = root.trim();
         if root.is_empty() {
             return;
         }
-        self.cvsroot = root.to_string();
-        Prefs::remember(&mut self.recent_roots, root);
+        let root = crate::client::root::Root::parse(root)
+            .map(|root| root.key)
+            .unwrap_or_else(|_| root.to_string());
+        self.cvsroot = root.clone();
+        Prefs::remember(&mut self.recent_roots, &root);
     }
 
     /// Write just the root keys into the settings file, keeping every other key as it
@@ -1057,6 +1061,14 @@ mod tests {
             Prefs::default().host,
             "an unknown name changes nothing"
         );
+    }
+
+    #[test]
+    fn a_root_password_is_not_kept_in_the_recent_list() {
+        let mut p = Prefs::default();
+        p.remember_root(":pserver:ann:secret@host:/repo");
+        assert_eq!(p.cvsroot, ":pserver:ann@host:/repo");
+        assert_eq!(p.recent_roots, vec![":pserver:ann@host:/repo"]);
     }
 
     #[test]

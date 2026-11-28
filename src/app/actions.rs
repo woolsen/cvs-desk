@@ -11,10 +11,11 @@ use cvsdesk::cvs_client::work::entries::Entries;
 use cvsdesk::entries::State;
 use cvsdesk::history::History;
 
+use crate::app::dialogs::checkout;
 use crate::app::dialogs::history::HistoryState;
 use crate::app::dialogs::tags::TagsState;
 use crate::app::dialogs::Dialog;
-use crate::app::{App, HistoryWait, OutputKind, TagWait};
+use crate::app::{App, HistoryWait, LoginPurpose, OutputKind, TagWait};
 
 impl App {
     // -- running commands ---------------------------------------------------
@@ -48,6 +49,9 @@ impl App {
         self.stop_requested = false;
         self.history_waiting = None;
         self.checkout_waiting = None;
+        self.pending_checkout = None;
+        self.login_purpose = None;
+        self.module_list_waiting = false;
         req.prune = self.prefs.prune;
         let password = req.password.clone();
         let root = self.root_for(&req);
@@ -500,10 +504,59 @@ impl App {
                 }
             }
             self.rx = None;
+            // Capture the finished command's own flags before a follow-up command (a login
+            // that resumes a checkout, or a tag query) replaces them.
+            let refresh = std::mem::take(&mut self.refresh_after_command);
+            let login_purpose = self.login_purpose.take();
+            let module_list = std::mem::take(&mut self.module_list_waiting);
+            let checkout_dir = self.checkout_waiting.take();
+            let mut moved = false;
+            let mut checkout_failed = false;
+            if let Some(purpose) = login_purpose {
+                let ok = exit_code == Some(0);
+                match purpose {
+                    LoginPurpose::Checkout => {
+                        if ok {
+                            if let Some(pending) = self.pending_checkout.take() {
+                                if let Some(pending) = checkout::start_pending(self, pending) {
+                                    checkout::reopen(
+                                        self,
+                                        pending,
+                                        "Could not start the checkout. See the Console."
+                                            .to_string(),
+                                    );
+                                    checkout_failed = true;
+                                    self.status = "Could not start the checkout".into();
+                                }
+                            }
+                        } else {
+                            let message = first_error(&self.captured);
+                            if let Some(pending) = self.pending_checkout.take() {
+                                checkout::reopen(self, pending, format!("Login failed: {message}"));
+                            }
+                            checkout_failed = true;
+                            self.status = "Login failed — see the Checkout window".into();
+                        }
+                    }
+                    LoginPurpose::Modules { root } => {
+                        if ok {
+                            if !checkout::start_module_list(self, root) {
+                                checkout::warn_dialog(
+                                    self,
+                                    "Could not start the module list. See the Console.",
+                                );
+                            }
+                        } else {
+                            let message = first_error(&self.captured);
+                            checkout::warn_dialog(self, format!("Login failed: {message}"));
+                            self.status = "Login failed — see the Checkout window".into();
+                        }
+                    }
+                }
+            }
             // A checkout that worked has created a folder worth showing. Anything else
             // that just ended leaves the window where it is.
-            let mut moved = false;
-            if let Some(dir) = self.checkout_waiting.take() {
+            if let Some(dir) = checkout_dir {
                 let ok = exit_code == Some(0) && dir.is_dir();
                 log::info!(
                     target: "cvsdesk::command",
@@ -513,9 +566,45 @@ impl App {
                     exit_code.unwrap_or(-1)
                 );
                 if ok {
+                    let last = self
+                        .pending_checkout
+                        .as_ref()
+                        .map(|pending| pending.memory());
+                    if let Some(last) = last {
+                        self.last_checkout = Some(last);
+                    }
+                    self.pending_checkout = None;
                     self.go_to(dir);
                     self.status = format!("Checked out into {}", self.dir.display());
                     moved = true;
+                } else {
+                    checkout_failed = true;
+                    let message = first_error(&self.captured);
+                    if let Some(pending) = self.pending_checkout.take() {
+                        let lower = message.to_ascii_lowercase();
+                        let needs_password = lower.contains("no saved password")
+                            || lower.contains("authorization failed")
+                            || lower.contains("authentication failed");
+                        let warning = if needs_password {
+                            format!(
+                                "No saved password for this root. Enter the password above, or use Tools → Login. ({message})"
+                            )
+                        } else {
+                            format!("Checkout failed: {message}")
+                        };
+                        checkout::reopen(self, pending, warning);
+                        self.status = "Checkout failed — see the Checkout window".into();
+                    }
+                }
+            }
+            if module_list {
+                let message = first_error(&self.captured);
+                if exit_code == Some(0) {
+                    checkout::warn_dialog(self, "");
+                    self.status = "Module list is in the Console".into();
+                } else {
+                    checkout::warn_dialog(self, format!("Could not list modules: {message}"));
+                    self.status = "Could not list modules — see the Console".into();
                 }
             }
             if let Some(wait) = self.history_waiting.take() {
@@ -567,9 +656,8 @@ impl App {
                     }
                 }
             }
-            // Capture the flag before a tag refresh query overwrites it: the create or
-            // delete that just ended still needs the file list read again.
-            let refresh = std::mem::take(&mut self.refresh_after_command);
+            // The create or delete that just ended still needs the file list read again;
+            // `refresh` was captured before any tag query could replace the flag.
             if let Some(wait) = self.tag_waiting.take() {
                 let code = exit_code.unwrap_or(-1);
                 match wait {
@@ -635,7 +723,7 @@ impl App {
             // Only a command that writes the working copy re-reads it, and then in place:
             // a query leaves the list exactly as it was, and a write keeps its selection,
             // scroll position and rows until the new ones arrive.
-            if refresh && !moved {
+            if refresh && !moved && !checkout_failed && !module_list {
                 self.refresh();
             }
             let bad = !self.captured.is_empty()
@@ -679,6 +767,9 @@ impl App {
         self.history_waiting = None;
         self.tag_waiting = None;
         self.checkout_waiting = None;
+        self.pending_checkout = None;
+        self.login_purpose = None;
+        self.module_list_waiting = false;
         if let Some(Dialog::Tags(state)) = self.dialog.as_mut() {
             state.loading = false;
             state.status = "Stopped.".into();

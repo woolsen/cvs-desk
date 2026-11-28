@@ -132,7 +132,8 @@ fn request(vendor: &str, release: &str, message: &str, module: &str, root: &str)
         files.push(release.trim().to_string());
     }
     req.files = files;
-    req.root = Some(root.trim().to_string());
+    let (root, _password) = super::connection::split_root(root);
+    req.root = Some(root);
     req
 }
 
@@ -167,6 +168,12 @@ mod tests {
         let req = request("acme", "R1", "", "proj", ":pserver:ann@host:/repo");
         assert_eq!(req.root.as_deref(), Some(":pserver:ann@host:/repo"));
         assert_eq!(req.files, vec!["proj", "acme", "R1"]);
+    }
+
+    #[test]
+    fn a_password_in_the_root_is_not_put_on_the_command_line() {
+        let req = request("acme", "R1", "", "proj", ":pserver:ann:secret@host:/repo");
+        assert_eq!(req.root.as_deref(), Some(":pserver:ann@host:/repo"));
     }
 
     #[test]

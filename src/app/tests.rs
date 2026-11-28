@@ -12,10 +12,11 @@ use cvsdesk::prefs::Prefs;
 use cvsdesk::remote::Listing;
 use cvsdesk::tags::TagInfo;
 
+use super::dialogs::checkout::{self, CheckoutDialog};
 use super::dialogs::tags::TagsState;
 use super::dialogs::Dialog;
 use super::files::{Filters, SortKey};
-use super::{App, HistoryWait, OutputKind, RemoteState, TagWait};
+use super::{App, HistoryWait, LoginPurpose, OutputKind, RemoteState, TagWait};
 
 pub(super) fn row(name: &str, is_dir: bool) -> Row {
     Row {
@@ -87,6 +88,10 @@ pub(super) fn app_with_rows(rows: Vec<Row>) -> App {
         refresh_in_place: false,
         refresh_after_command: false,
         checkout_waiting: None,
+        pending_checkout: None,
+        login_purpose: None,
+        module_list_waiting: false,
+        last_checkout: None,
         pending: Vec::new(),
         captured: Vec::new(),
         pane_output: Default::default(),
@@ -1093,6 +1098,171 @@ fn a_failed_checkout_stays_where_it_was() {
     app.poll();
 
     assert_eq!(app.dir, base, "nothing was created, so nothing is opened");
+    assert!(app.checkout_waiting.is_none());
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_failed_checkout_comes_back_with_its_fields() {
+    let base = std::env::temp_dir().join(format!("cvsdesk-checkout-reopen-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    app.has_cvs = false;
+    let mut dialog = CheckoutDialog::new("HEAD", false, ":pserver:ann@host:/repo".into());
+    dialog.module = "proj".into();
+    let pending = checkout::pending_for_test(dialog, &base);
+    app.pending_checkout = Some(pending);
+    app.checkout_waiting = Some(base.join("proj"));
+    app.refresh_after_command = true;
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Line(
+        "cvs [checkout aborted]: no saved password for this root; run 'cvs login' first".into(),
+    ))
+    .unwrap();
+    tx.send(Msg::Done(1)).unwrap();
+    app.poll();
+
+    let Some(Dialog::Checkout(state)) = app.dialog.as_ref() else {
+        panic!("the failed checkout must come back as a window");
+    };
+    assert_eq!(state.module, "proj");
+    assert_eq!(state.root, ":pserver:ann@host:/repo");
+    assert!(
+        state.warning.contains("password"),
+        "the warning must name the way out: {}",
+        state.warning
+    );
+    assert!(app.pending_checkout.is_none());
+    assert!(
+        app.loading.is_none(),
+        "a failed checkout must not re-read the folder it was started from"
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_failed_login_returns_to_the_checkout_window() {
+    let base = std::env::temp_dir().join(format!("cvsdesk-checkout-login-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    app.has_cvs = false;
+    let mut dialog = CheckoutDialog::new("HEAD", false, ":pserver:ann@host:/repo".into());
+    dialog.module = "proj".into();
+    let pending = checkout::pending_for_test(dialog, &base);
+    app.pending_checkout = Some(pending);
+    app.login_purpose = Some(LoginPurpose::Checkout);
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Line(
+        "cvs [login aborted]: authorization failed".into(),
+    ))
+    .unwrap();
+    tx.send(Msg::Done(1)).unwrap();
+    app.poll();
+
+    let Some(Dialog::Checkout(state)) = app.dialog.as_ref() else {
+        panic!("a failed login must bring the checkout window back");
+    };
+    assert_eq!(state.module, "proj");
+    assert!(state.warning.contains("Login failed"), "{}", state.warning);
+    assert!(app.pending_checkout.is_none());
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_failed_module_list_warns_in_the_open_window() {
+    let mut app = app_with_rows(Vec::new());
+    app.dialog = Some(Dialog::Checkout(Box::new(CheckoutDialog::new(
+        "HEAD",
+        false,
+        ":pserver:ann@host:/repo".into(),
+    ))));
+    app.module_list_waiting = true;
+    app.refresh_after_command = true;
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Line("cvs [checkout aborted]: no such module".into()))
+        .unwrap();
+    tx.send(Msg::Done(1)).unwrap();
+    app.poll();
+
+    let Some(Dialog::Checkout(state)) = app.dialog.as_ref() else {
+        panic!("the module list must not close the window");
+    };
+    assert!(
+        state.warning.contains("Could not list modules"),
+        "{}",
+        state.warning
+    );
+    assert!(
+        app.loading.is_none(),
+        "a read-only module list must not re-read the folder"
+    );
+}
+
+#[test]
+fn a_non_empty_target_asks_before_the_checkout_starts() {
+    let base =
+        std::env::temp_dir().join(format!("cvsdesk-checkout-confirm-{}", std::process::id()));
+    let target = base.join("proj");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("a.txt"), b"x").unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    app.has_cvs = false;
+    let mut dialog = CheckoutDialog::new("HEAD", false, ":pserver:ann@host:/repo".into());
+    dialog.module = "proj".into();
+
+    let returned = checkout::apply(&mut app, Dialog::Checkout(Box::new(dialog)));
+
+    let Some(Dialog::Checkout(state)) = returned else {
+        panic!("the window must stay open for the confirmation");
+    };
+    assert!(state.warning.contains("not empty"), "{}", state.warning);
+    assert_eq!(state.confirmed.as_deref(), Some(target.as_path()));
+    assert!(
+        !app.runner.running,
+        "nothing may run before the user confirms"
+    );
+    assert!(app.checkout_waiting.is_none());
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn the_checkout_window_names_the_current_folder_and_stays_open() {
+    let base =
+        std::env::temp_dir().join(format!("cvsdesk-checkout-current-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    let mut dialog = CheckoutDialog::new("HEAD", false, ":pserver:ann@host:/repo".into());
+    dialog.module = "proj".into();
+    dialog.folder = ".".into();
+
+    let returned = checkout::apply(&mut app, Dialog::Checkout(Box::new(dialog)));
+
+    let Some(Dialog::Checkout(state)) = returned else {
+        panic!("the window must stay open after a bad folder");
+    };
+    assert!(
+        state
+            .warning
+            .contains("other than the one the window shows"),
+        "{}",
+        state.warning
+    );
+    assert!(!app.runner.running);
     assert!(app.checkout_waiting.is_none());
 
     let _ = fs::remove_dir_all(&base);

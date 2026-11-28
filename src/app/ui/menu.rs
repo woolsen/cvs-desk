@@ -29,13 +29,15 @@ impl App {
                     }
                     ui.separator();
                     if ui.button("Checkout…").clicked() {
-                        self.open_dialog(Dialog::Checkout {
-                            tag: "HEAD".into(),
-                            readonly: self.prefs.checkout_ro,
-                            module: String::new(),
-                            folder: String::new(),
-                            root: self.default_connection(),
-                        });
+                        let mut state = crate::app::dialogs::checkout::CheckoutDialog::new(
+                            "HEAD",
+                            self.prefs.checkout_ro,
+                            self.default_connection(),
+                        );
+                        if let Some(last) = &self.last_checkout {
+                            last.restore(&mut state);
+                        }
+                        self.open_dialog(Dialog::Checkout(Box::new(state)));
                         ui.close();
                     }
                     if ui.button("Import…").clicked() {

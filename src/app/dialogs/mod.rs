@@ -5,10 +5,11 @@ use cvsdesk::prefs::Prefs;
 use crate::app::App;
 
 mod about;
-mod checkout;
+pub(crate) mod checkout;
 mod command_line;
 mod commit;
 mod compare;
+mod connection;
 pub(super) mod history;
 mod import;
 mod login;
@@ -17,15 +18,7 @@ mod repository;
 pub(super) mod tags;
 
 pub(super) enum Dialog {
-    Checkout {
-        tag: String,
-        readonly: bool,
-        module: String,
-        /// The folder cvs writes the working copy into. Empty means the module's name
-        /// under the folder the window shows.
-        folder: String,
-        root: String,
-    },
+    Checkout(Box<checkout::CheckoutDialog>),
     Import {
         vendor: String,
         release: String,
@@ -63,6 +56,7 @@ pub(super) enum Dialog {
 pub(super) enum DialogAction {
     Close,
     Checkout,
+    ListModules,
     Import,
     TagsCreate,
     TagsDelete,
@@ -86,18 +80,15 @@ impl App {
         let raise_windows = self.shot.is_none();
         let busy = self.runner.running;
         let has_cvs = self.has_cvs;
+        let base = self.dir.clone();
         let action = {
             let Some(d) = &mut self.dialog else {
                 return;
             };
             match d {
-                Dialog::Checkout {
-                    tag,
-                    readonly,
-                    module,
-                    folder,
-                    root,
-                } => checkout::show(ctx, tag, readonly, module, folder, root, &recent_roots),
+                Dialog::Checkout(state) => {
+                    checkout::show(ctx, state.as_mut(), &recent_roots, &base, has_cvs, busy)
+                }
                 Dialog::Import {
                     vendor,
                     release,
@@ -118,7 +109,9 @@ impl App {
                 Dialog::Commit { text, file, force } => {
                     commit::show(ctx, text, file, force, &sel_names)
                 }
-                Dialog::Login { password, root } => login::show(ctx, password, root, &recent_roots),
+                Dialog::Login { password, root } => {
+                    login::show(ctx, password, root, &recent_roots, busy)
+                }
                 Dialog::Compare { revision } => compare::show(ctx, revision),
                 Dialog::Preferences { tab, draft } => preferences::show(ctx, tab, draft),
                 Dialog::CommandLine { text } => command_line::show(ctx, text, &cvsroot),
@@ -155,6 +148,10 @@ impl App {
                 self.request_tags();
                 return;
             }
+            DialogAction::ListModules => {
+                checkout::list_modules(self);
+                return;
+            }
             DialogAction::HistoryRefresh => {
                 if let Some(Dialog::History(state)) = self.dialog.as_ref() {
                     let dir = state.dir().to_path_buf();
@@ -177,7 +174,11 @@ impl App {
             return;
         };
         match a {
-            DialogAction::Checkout => checkout::apply(self, d),
+            DialogAction::Checkout => {
+                if let Some(d) = checkout::apply(self, d) {
+                    self.dialog = Some(d);
+                }
+            }
             DialogAction::Import => import::apply(self, d),
             DialogAction::Commit => commit::apply(self, d),
             DialogAction::Login => login::apply(self, d),
@@ -185,6 +186,7 @@ impl App {
             DialogAction::SavePrefs => preferences::apply(self, d),
             DialogAction::RunLine => command_line::apply(self, d),
             DialogAction::Close
+            | DialogAction::ListModules
             | DialogAction::TagsCreate
             | DialogAction::TagsDelete
             | DialogAction::TagsRetry

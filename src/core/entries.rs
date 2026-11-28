@@ -649,9 +649,21 @@ pub fn build_cvsroot(
 }
 
 /// Pull the pieces of an existing CVSROOT string back out, so the dialog can show them.
+/// A password in the userinfo is not returned with the user: it must never be shown.
 pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
+    let trimmed = root.trim();
+    if !trimmed.starts_with(':') {
+        // A bare path is a local root, exactly as `Root::parse` reads it.
+        return (
+            ConnKind::Local,
+            String::new(),
+            String::new(),
+            String::new(),
+            trimmed.to_string(),
+        );
+    }
     let mut kind = ConnKind::Pserver;
-    let mut rest = root.trim();
+    let mut rest = trimmed;
     if let Some(stripped) = rest.strip_prefix(':') {
         if let Some(end) = stripped.find(':') {
             let token = &stripped[..end];
@@ -661,20 +673,34 @@ pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
             rest = &stripped[end + 1..];
         }
     }
-    let (auth, path) = match rest.find(':') {
-        Some(i) => (&rest[..i], &rest[i + 1..]),
-        None => ("", rest),
+    if !kind.remote() {
+        return (
+            kind,
+            String::new(),
+            String::new(),
+            String::new(),
+            rest.to_string(),
+        );
+    }
+    // A proxy is written before the userinfo: `proxy=HOST:PORT:user@host[:port]:path`.
+    rest = strip_proxy(rest);
+    // The path starts after the last colon of `user[:password]@host[:port]:path`. A root
+    // written without that colon still has a slash before its path.
+    let (info, path) = match rest.rfind(':') {
+        Some(at) => (&rest[..at], &rest[at + 1..]),
+        None => match rest.find('/') {
+            Some(at) => (&rest[..at], &rest[at..]),
+            None => (rest, ""),
+        },
     };
-    let (auth, _proxy) = match auth.find(":proxy=") {
-        Some(i) => (&auth[..i], &auth[i..]),
-        None => (auth, ""),
+    let (auth, hostport) = match info.rfind('@') {
+        Some(at) => (&info[..at], &info[at + 1..]),
+        None => ("", info),
     };
-    let (user, hostport) = match auth.find('@') {
-        Some(i) => (&auth[..i], &auth[i + 1..]),
-        None => ("", auth),
-    };
+    // The userinfo may carry a password as `user:password`; only the account is shown.
+    let user = auth.split(':').next().unwrap_or("").trim();
     let (host, port) = match hostport.rfind(':') {
-        Some(i) => (&hostport[..i], &hostport[i + 1..]),
+        Some(at) => (&hostport[..at], &hostport[at + 1..]),
         None => (hostport, ""),
     };
     (
@@ -684,6 +710,20 @@ pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
         port.to_string(),
         path.to_string(),
     )
+}
+
+/// Drop a leading `proxy=HOST:PORT:` from a root's remaining text.
+fn strip_proxy(rest: &str) -> &str {
+    let Some(after) = rest.strip_prefix("proxy=") else {
+        return rest;
+    };
+    let Some(host_end) = after.find(':') else {
+        return rest;
+    };
+    let Some(port_end) = after[host_end + 1..].find(':') else {
+        return rest;
+    };
+    &after[host_end + 1 + port_end + 1..]
 }
 
 /// Best-effort local-time string for display, used by the status bar.
@@ -879,6 +919,47 @@ mod tests {
             recorded
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_root_password_is_not_part_of_the_displayed_user() {
+        let (kind, user, host, port, path) = parse_cvsroot(":pserver:ann:secret@host:2401:/repo");
+        assert_eq!(kind, ConnKind::Pserver);
+        assert_eq!(user, "ann");
+        assert_eq!(host, "host");
+        assert_eq!(port, "2401");
+        assert_eq!(path, "/repo");
+    }
+
+    #[test]
+    fn a_root_with_a_port_keeps_its_path() {
+        let (kind, user, host, port, path) = parse_cvsroot(":kserver:ann@cvshost:2402:/repo");
+        assert_eq!(kind, ConnKind::Kserver);
+        assert_eq!(user, "ann");
+        assert_eq!(host, "cvshost");
+        assert_eq!(port, "2402");
+        assert_eq!(path, "/repo");
+    }
+
+    #[test]
+    fn a_bare_path_is_a_local_root() {
+        let (kind, user, host, port, path) = parse_cvsroot("C:\\work");
+        assert_eq!(kind, ConnKind::Local);
+        assert!(user.is_empty());
+        assert!(host.is_empty());
+        assert!(port.is_empty());
+        assert_eq!(path, "C:\\work");
+    }
+
+    #[test]
+    fn a_proxied_root_keeps_the_account_and_path() {
+        let (kind, user, host, port, path) =
+            parse_cvsroot(":pserver:proxy=proxyhost:8080:ann@host:/repo");
+        assert_eq!(kind, ConnKind::Pserver);
+        assert_eq!(user, "ann");
+        assert_eq!(host, "host");
+        assert!(port.is_empty());
+        assert_eq!(path, "/repo");
     }
 
     #[test]
