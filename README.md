@@ -31,6 +31,29 @@ to change before 1.0.
 |---|---|
 | ![Revision graph](docs/screenshots/graph.png) | ![Preferences](docs/screenshots/preferences.png) |
 
+## Getting a working copy
+
+A repository that already exists on the server needs no setup there: a checkout writes a
+working copy into the folder you choose.
+
+1. **Tools > Login…** once for a `:pserver:` account. The client saves the password in
+   `.cvspass` and reads it from there for later commands.
+2. **File > Checkout…** with the repository, the module, and a tag or branch if you want
+   one. **Folder** names the working-copy folder: leave it empty to use the module's name
+   under the folder the window shows, or type an absolute or relative path. The window
+   opens the folder when the checkout finishes.
+3. **Modify > Update** brings the folder and its subfolders in line with the repository.
+   `Update All (This Folder)` updates everything whatever is selected. **Modify > Commit…**
+   sends changes back, and **Query > Query Update** previews an update without writing
+   anything.
+
+The bundled `cvs.exe` does the same from a console:
+
+```text
+cd /d D:\work
+cvs -d :pserver:ann@host:/repo checkout -d proj proj
+```
+
 ## Download
 
 Prebuilt binaries for 64-bit Windows 10 and 11 are on the

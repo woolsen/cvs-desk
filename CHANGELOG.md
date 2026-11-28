@@ -6,6 +6,17 @@ All notable changes to CVS Desk are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The Checkout window takes a folder for the working copy, so a module can be checked
+  out into a directory other than the one it is named after.
+
+### Fixed
+
+- Checkout sent the tag as `-d` and a bare `-r`, so the module landed in a folder named
+  after the tag. The tag, the read-only switch and the optional destination are now sent
+  where cvs reads them.
+
 ## [0.1.0] - 2026-11-27
 
 ### Added
