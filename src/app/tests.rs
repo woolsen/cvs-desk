@@ -1146,6 +1146,67 @@ fn a_failed_checkout_comes_back_with_its_fields() {
 }
 
 #[test]
+fn a_successful_login_starts_the_pending_checkout() {
+    let base = std::env::temp_dir().join(format!("cvsdesk-checkout-go-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    app.has_cvs = false;
+    let mut dialog = CheckoutDialog::new("HEAD", false, base.display().to_string());
+    dialog.module = "proj".into();
+    let pending = checkout::pending_for_test(dialog, &base);
+    app.pending_checkout = Some(pending);
+    app.login_purpose = Some(LoginPurpose::Checkout);
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Done(0)).unwrap();
+    app.poll();
+
+    assert!(
+        app.checkout_waiting.is_some(),
+        "a successful login must start the checkout it was waiting for"
+    );
+    assert!(app.pending_checkout.is_some());
+    assert!(app.login_purpose.is_none());
+    app.stop();
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_successful_login_starts_the_module_list() {
+    let base = std::env::temp_dir().join(format!("cvsdesk-module-list-go-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+
+    let mut app = app_with_rows(Vec::new());
+    app.dir = base.clone();
+    app.has_cvs = false;
+    app.dialog = Some(Dialog::Checkout(Box::new(CheckoutDialog::new(
+        "HEAD",
+        false,
+        base.display().to_string(),
+    ))));
+    app.login_purpose = Some(LoginPurpose::Modules {
+        root: base.display().to_string(),
+    });
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Done(0)).unwrap();
+    app.poll();
+
+    assert!(
+        app.module_list_waiting,
+        "a successful login must start the module list"
+    );
+    assert!(
+        matches!(app.dialog, Some(Dialog::Checkout(_))),
+        "the module list must leave the Checkout window open"
+    );
+    app.stop();
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
 fn a_failed_login_returns_to_the_checkout_window() {
     let base = std::env::temp_dir().join(format!("cvsdesk-checkout-login-{}", std::process::id()));
     fs::create_dir_all(&base).unwrap();
