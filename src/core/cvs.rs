@@ -143,6 +143,9 @@ pub struct CommandRequest {
     pub message: String,
     pub tag: String,
     pub branch: bool,
+    /// `checkout -d`: the folder the working copy is written into. Empty names no folder,
+    /// so cvs creates one after the module.
+    pub destination: String,
     /// `tag -d`: remove the tag instead of creating it. Kept apart from `extra` so the
     /// switch stays before the tag name, where cvs parses it as an option.
     pub delete: bool,
@@ -199,6 +202,11 @@ impl CommandRequest {
             args.push(root.trim().to_string());
         }
         args.extend(globals.iter().cloned());
+        // `-r` before the command is the global "make new working files read-only"
+        // switch. After the command it would be checkout's revision option instead.
+        if self.readonly {
+            args.push("-r".into());
+        }
         if let Some(raw) = &self.raw_args {
             args.extend(raw.iter().cloned());
             return args;
@@ -255,12 +263,15 @@ impl CommandRequest {
             Cmd::WatchOn => args.push("on".into()),
             Cmd::WatchOff => args.push("off".into()),
             Cmd::Checkout => {
-                if self.readonly {
-                    args.push("-r".into());
-                }
-                args.push("-d".into());
+                // `-r <tag>` selects the revision or branch; a bare `-r` would make
+                // checkout read the next argument as the revision.
                 if !self.tag.trim().is_empty() {
+                    args.push("-r".into());
                     args.push(self.tag.trim().to_string());
+                }
+                if !self.destination.trim().is_empty() {
+                    args.push("-d".into());
+                    args.push(self.destination.trim().to_string());
                 }
             }
             _ => {}
@@ -577,7 +588,7 @@ mod tests {
 
         let mut checkout = CommandRequest::new(Cmd::Checkout);
         checkout.prune = true;
-        assert_eq!(checkout.to_args("", &[]), vec!["checkout", "-P", "-d"]);
+        assert_eq!(checkout.to_args("", &[]), vec!["checkout", "-P"]);
 
         let mut status = CommandRequest::new(Cmd::Status);
         status.prune = true;
@@ -586,6 +597,33 @@ mod tests {
             vec!["status"],
             "-P is not a status switch"
         );
+    }
+
+    #[test]
+    fn a_checkout_puts_the_tag_and_the_folder_after_checkout() {
+        let mut req = CommandRequest::new(Cmd::Checkout);
+        req.tag = "Release_1_0".to_string();
+        req.destination = "work".to_string();
+        req.files = vec!["proj".to_string()];
+        assert_eq!(
+            req.to_args("", &[]),
+            vec!["checkout", "-r", "Release_1_0", "-d", "work", "proj"]
+        );
+    }
+
+    #[test]
+    fn a_plain_checkout_names_only_the_module() {
+        let mut req = CommandRequest::new(Cmd::Checkout);
+        req.files = vec!["proj".to_string()];
+        assert_eq!(req.to_args("", &[]), vec!["checkout", "proj"]);
+    }
+
+    #[test]
+    fn a_read_only_checkout_is_a_global_switch() {
+        let mut req = CommandRequest::new(Cmd::Checkout);
+        req.readonly = true;
+        req.files = vec!["proj".to_string()];
+        assert_eq!(req.to_args("", &[]), vec!["-r", "checkout", "proj"]);
     }
 
     #[test]
