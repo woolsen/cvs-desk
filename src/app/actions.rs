@@ -1178,11 +1178,11 @@ fn first_error(lines: &[String]) -> String {
 /// it fails, and a checkout prints progress first, so the first non-empty line is often
 /// not the error.
 fn command_error(lines: &[String]) -> String {
-    // A line that says the command aborted is the one worth showing, before any progress
-    // or status line that happens to contain another keyword.
+    // `cvs [login aborted]: ...` is the line worth showing, before any progress or status
+    // line that happens to contain another keyword.
     if let Some(line) = lines
         .iter()
-        .find(|line| line.to_ascii_lowercase().contains("aborted"))
+        .find(|line| line.to_ascii_lowercase().contains("aborted]:"))
     {
         return line.clone();
     }
@@ -1198,7 +1198,8 @@ fn command_error(lines: &[String]) -> String {
                 return false;
             }
             let lower = line.to_ascii_lowercase();
-            lower.contains("failed")
+            lower.contains("aborted")
+                || lower.contains("failed")
                 || lower.contains("refused")
                 || lower.contains("cannot")
                 || lower.contains("could not")
@@ -1288,6 +1289,30 @@ mod tests {
             "cvs checkout: cannot find module".to_string(),
         ];
         assert_eq!(command_error(&lines), "cvs checkout: cannot find module");
+    }
+
+    #[test]
+    fn a_root_named_aborted_does_not_hide_the_error() {
+        let lines = vec![
+            "Logging in to :pserver:ann@host:/aborted-builds/repo".to_string(),
+            "cvs [login aborted]: authorization failed".to_string(),
+        ];
+        assert_eq!(
+            command_error(&lines),
+            "cvs [login aborted]: authorization failed"
+        );
+    }
+
+    #[test]
+    fn an_aborted_file_name_is_not_the_error() {
+        let lines = vec![
+            "U aborted_test.rs".to_string(),
+            "cvs [checkout aborted]: cannot find module".to_string(),
+        ];
+        assert_eq!(
+            command_error(&lines),
+            "cvs [checkout aborted]: cannot find module"
+        );
     }
 
     #[test]

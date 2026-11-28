@@ -1051,6 +1051,19 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_like_password_is_redacted() {
+        assert_eq!(
+            clean_root(":pserver:ann:p:\\x@host:/repo"),
+            ":pserver:ann@host:/repo"
+        );
+        assert_eq!(
+            parse_cvsroot(":pserver:ann:p:\\x@host:/repo").1,
+            "ann",
+            "the user is the account, not the password"
+        );
+    }
+
+    #[test]
     fn a_valid_root_with_an_at_in_the_path_is_not_corrupted() {
         assert_eq!(
             clean_root(":pserver:ann@host:C:\\repos\\team@corp\\repo"),

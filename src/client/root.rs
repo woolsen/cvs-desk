@@ -319,6 +319,11 @@ fn default_port(method: &Method) -> u16 {
 
 /// Whether the `@` at `at` is inside a Windows path rather than the userinfo.
 pub(crate) fn at_is_path(rest: &str, at: usize) -> bool {
+    // If the text after the @ is `host[:port]:path`, the @ is the userinfo separator.
+    // This keeps a password such as `p:\x` from looking like a path.
+    if split_host_path(&rest[at + 1..]).is_some() {
+        return false;
+    }
     let Some(colon) = rest[..at].find(':') else {
         return false;
     };
@@ -480,6 +485,18 @@ mod tests {
         assert_eq!(root.password.as_deref(), Some("se\\cret"));
         assert_eq!(root.host, "host");
         assert_eq!(root.path, "/repo");
+    }
+
+    #[test]
+    fn a_drive_like_password_is_not_read_as_a_path() {
+        // `p:\x` looks like a drive path, but the text after the @ is a valid
+        // host and path, so the @ really is the userinfo separator.
+        let root = Root::parse(":pserver:ann:p:\\x@host:/repo").unwrap();
+        assert_eq!(root.user, "ann");
+        assert_eq!(root.password.as_deref(), Some("p:\\x"));
+        assert_eq!(root.host, "host");
+        assert_eq!(root.path, "/repo");
+        assert_eq!(root.key, ":pserver:ann@host:/repo");
     }
 
     #[test]
