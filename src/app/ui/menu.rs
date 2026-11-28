@@ -237,10 +237,26 @@ impl App {
                             self.cvs_command(Cmd::QueryUpdate);
                             ui.close();
                         }
-                        if ui.button("Diff").clicked() {
-                            self.open_diff_dialog();
-                            ui.close();
-                        }
+                        ui.menu_button("Compare with…", |ui| {
+                            if ui.button("Working Copy").clicked() {
+                                self.diff_working_copy();
+                                ui.close();
+                            }
+                            if ui.button("Revision or Tag…").clicked() {
+                                self.open_dialog(Dialog::Compare {
+                                    revision: String::new(),
+                                });
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Diff Options…").clicked() {
+                                self.open_dialog(Dialog::Preferences {
+                                    tab: 3,
+                                    draft: Box::new(self.prefs.clone()),
+                                });
+                                ui.close();
+                            }
+                        });
                         if ui
                             .add_enabled(history_ready, egui::Button::new("File History…"))
                             .on_hover_text("Select one local file to see its history")
@@ -291,10 +307,6 @@ impl App {
                     ui.add_enabled_ui(in_project, |ui| {
                         if cmd_item(ui, &Cmd::Export) {
                             self.cvs_command(Cmd::Export);
-                            ui.close();
-                        }
-                        if cmd_item(ui, &Cmd::Rdiff) {
-                            self.cvs_command(Cmd::Rdiff);
                             ui.close();
                         }
                         if cmd_item(ui, &Cmd::Admin) {

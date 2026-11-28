@@ -1161,7 +1161,7 @@ impl App {
                 self.open_commit_dialog(template);
             }
             FileMenuAction::Diff => {
-                self.open_diff_dialog();
+                self.diff_working_copy();
             }
             FileMenuAction::History => {
                 let Some(row) = self.rows.get(index) else {

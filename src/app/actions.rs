@@ -130,28 +130,56 @@ impl App {
         });
     }
 
-    pub(super) fn open_diff_dialog(&mut self) {
+    /// Query > Compare with > Working Copy, and the file menu's Diff: the selection
+    /// against the files on disk.
+    pub(super) fn diff_working_copy(&mut self) {
+        if !self.diff_ready() {
+            return;
+        }
+        let mut req = CommandRequest::new(Cmd::Diff);
+        req.files = self.selected_local_names();
+        req.extra = self.prefs.diff_flags();
+        self.start(req, OutputKind::Diff);
+    }
+
+    /// Query > Compare with > Revision or Tag. cvs reads a revision and a tag the same
+    /// way in `-r`, so one entry covers "what changed since 1.4" and "what changed since
+    /// the release".
+    pub(super) fn diff_with(&mut self, revision: &str) {
+        let revision = revision.trim();
+        if revision.is_empty() {
+            self.status = "Enter a revision or tag to compare with".into();
+            return;
+        }
+        if !self.diff_ready() {
+            return;
+        }
+        let req = compare_request(
+            self.selected_local_names(),
+            self.prefs.diff_flags(),
+            revision,
+        );
+        self.start(req, OutputKind::Diff);
+    }
+
+    /// The checks both comparisons share: there must be something checked out, and the
+    /// filter must not be hiding all of it.
+    fn diff_ready(&mut self) -> bool {
         if self.selection_is_all_remote() {
             self.status = "The selected rows are not checked out; check them out first".into();
-            return;
+            return false;
         }
         if !self.selected.is_empty() && self.selected_local_names().is_empty() {
             self.status =
                 "The selected rows are hidden by the current filter; clear it or select visible rows"
                     .into();
-            return;
+            return false;
         }
         if self.selected.is_empty() && self.has_active_filter() {
             self.status = "Select files, or clear the filter to diff this folder".into();
-            return;
+            return false;
         }
-        self.open_dialog(Dialog::Diff {
-            unified: self.prefs.unified,
-            ignore_case: self.prefs.ignore_case,
-            no_whitespace: self.prefs.no_whitespace,
-            no_blank_lines: self.prefs.no_blank_lines,
-            extra: self.prefs.diff_options.clone(),
-        });
+        true
     }
 
     pub(super) fn cvs_command(&mut self, cmd: Cmd) {
@@ -911,6 +939,22 @@ impl App {
             self.rows.iter().filter(|row| !row.is_dir).count()
         );
     }
+}
+
+/// The command a "Compare with…" runs: the same flags a plain diff uses, then the
+/// revision or tag the user picked, then the selection. cvs reads the revision as a
+/// `diff` switch, so it must come before the file names.
+pub(super) fn compare_request(
+    files: Vec<String>,
+    flags: Vec<String>,
+    revision: &str,
+) -> CommandRequest {
+    let mut req = CommandRequest::new(Cmd::Diff);
+    req.files = files;
+    req.extra = flags;
+    req.extra.push("-r".to_string());
+    req.extra.push(revision.to_string());
+    req
 }
 
 /// The first line of a failed reply, for the small error line inside a dialog.

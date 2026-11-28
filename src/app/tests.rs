@@ -1217,6 +1217,21 @@ fn a_failed_tag_write_keeps_its_error_and_does_not_read_the_tags_again() {
 }
 
 #[test]
+fn comparing_with_a_revision_sends_it_before_the_files() {
+    let req = super::actions::compare_request(
+        vec!["a.txt".to_string()],
+        vec!["-u".to_string()],
+        "REL_1_0",
+    );
+
+    assert_eq!(
+        req.to_args("", &[]),
+        vec!["diff", "-u", "-r", "REL_1_0", "a.txt"],
+        "the revision is a diff switch, so it comes before the names"
+    );
+}
+
+#[test]
 fn changing_folders_closes_the_tags_window() {
     let mut app = app_with_rows(Vec::new());
     app.dialog = Some(Dialog::Tags(Box::new(TagsState::loading(

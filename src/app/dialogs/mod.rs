@@ -8,7 +8,7 @@ mod about;
 mod checkout;
 mod command_line;
 mod commit;
-mod diff;
+mod compare;
 pub(super) mod history;
 mod import;
 mod login;
@@ -40,12 +40,8 @@ pub(super) enum Dialog {
         password: String,
         root: String,
     },
-    Diff {
-        unified: bool,
-        ignore_case: bool,
-        no_whitespace: bool,
-        no_blank_lines: bool,
-        extra: String,
+    Compare {
+        revision: String,
     },
     Preferences {
         tab: usize,
@@ -68,7 +64,7 @@ pub(super) enum DialogAction {
     TagsRetry,
     Commit,
     Login,
-    Diff,
+    Compare,
     SavePrefs,
     RunLine,
     HistoryRefresh,
@@ -117,20 +113,7 @@ impl App {
                     commit::show(ctx, text, file, force, &sel_names)
                 }
                 Dialog::Login { password, root } => login::show(ctx, password, root, &recent_roots),
-                Dialog::Diff {
-                    unified,
-                    ignore_case,
-                    no_whitespace,
-                    no_blank_lines,
-                    extra,
-                } => diff::show(
-                    ctx,
-                    unified,
-                    ignore_case,
-                    no_whitespace,
-                    no_blank_lines,
-                    extra,
-                ),
+                Dialog::Compare { revision } => compare::show(ctx, revision),
                 Dialog::Preferences { tab, draft } => preferences::show(ctx, tab, draft),
                 Dialog::CommandLine { text } => command_line::show(ctx, text, &cvsroot),
                 Dialog::History(state) => {
@@ -189,7 +172,7 @@ impl App {
             DialogAction::Import => import::apply(self, d),
             DialogAction::Commit => commit::apply(self, d),
             DialogAction::Login => login::apply(self, d),
-            DialogAction::Diff => diff::apply(self, d),
+            DialogAction::Compare => compare::apply(self, d),
             DialogAction::SavePrefs => preferences::apply(self, d),
             DialogAction::RunLine => command_line::apply(self, d),
             DialogAction::Close
