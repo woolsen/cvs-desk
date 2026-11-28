@@ -96,6 +96,12 @@ JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf)
           Copy-Item -Path README.md, LICENSE, third-party-licenses.txt -Destination $stage
           if (Test-Path CHANGELOG.md) { Copy-Item -Path CHANGELOG.md -Destination $stage }
 
+          # README.md links these images, so the extracted folder must carry them too.
+          New-Item -ItemType Directory -Force (Join-Path $stage "docs/screenshots") | Out-Null
+          Copy-Item -Path docs/screenshots/*.png -Destination (Join-Path $stage "docs/screenshots")
+          New-Item -ItemType Directory -Force (Join-Path $stage "assets") | Out-Null
+          Copy-Item -Path assets/cvsdesk-256.png -Destination (Join-Path $stage "assets")
+
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path $stage -DestinationPath "dist/$name.zip" -Force
 
