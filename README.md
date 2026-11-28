@@ -6,54 +6,15 @@
 
 [![CI](https://github.com/woolsen/cvs-desk/actions/workflows/ci.yml/badge.svg)](https://github.com/woolsen/cvs-desk/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/woolsen/cvs-desk)](https://github.com/woolsen/cvs-desk/releases/latest)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
 
 CVS Desk is a Windows desktop front end for CVS, written in Rust with egui. It ships with its
 own CVS client, so the desktop program does not need an external `cvs.exe`.
 
+CVS Desk is at version 0.1. The window and the bundled client are usable today; expect details
+to change before 1.0.
+
 ![CVS Desk main window](docs/screenshots/main.png)
-
-## Download
-
-Prebuilt binaries for Windows 10 and 11 are on the
-[releases page](https://github.com/woolsen/cvs-desk/releases/latest). Download the
-`windows-x64.zip`, extract it anywhere, and run `cvsdesk.exe`. The `cvs.exe` beside it is the
-standalone command-line client. The zip also contains `LICENSE` and `third-party-licenses.txt`,
-the full license texts for CVS Desk and its dependencies.
-
-The build is not code-signed yet, so Windows SmartScreen may warn about it. Each release
-includes `SHA256SUMS.txt` for checking the download.
-
-## Graphics
-
-The window draws through OpenGL. That keeps the program small: on an Intel integrated GPU
-the same window needs about 73 MB of private memory this way, against 355 MB when it is
-drawn through DX12.
-
-A remote desktop session or a virtual machine may offer no usable OpenGL, and then the
-window cannot open. Name another backend before starting the program:
-
-```text
-set WGPU_BACKEND=vulkan
-cvsdesk.exe
-```
-
-`WGPU_BACKEND=dx12` does the same on a machine whose Vulkan driver is missing.
-
-## Diagnostics
-
-CVS Desk keeps a log of what the program was doing: command phases, connection stages,
-counts, timings, and error kinds. It does not keep the user's data: no file contents, commit
-messages, passwords, CVSROOT/host/user, complete paths, or lists of files touched. A file
-name appears only when one file is the failing input.
-
-The log is `cvsdesk.log` under `%LOCALAPPDATA%\CVSDesk\logs`, rotated at 2 MB with two older
-files kept. **Help > Open Log Folder** shows it, and **Help > Copy Diagnostics** puts the
-program version and the most recent lines on the clipboard.
-
-`--log-level debug` adds per-phase detail, and `CVSDESK_LOG=debug` does the same for a start
-that cannot take a switch. The Preferences window can turn the same detail on for the next
-start. Old logs are removed after 14 days. A debug log beside a bug report is worth more
-than a description of the window alone.
 
 ## Features
 
@@ -61,14 +22,49 @@ than a description of the window alone.
 - Update, commit, diff, log, status, annotate, history, tag, and branch operations.
 - Revision graph and tag browser.
 - Checkout, import, release, and repository browsing.
-- Built-in `cvs` client with `:pserver:` and `:ext:` support, `.cvspass`, `~/.cvsrc`, and
-  Gzip-stream compression.
+- Built-in `cvs` client with `:pserver:` and `:ext:` support, `.cvspass`, the Windows CVSNT
+  password store, `~/.cvsrc`, and Gzip-stream compression.
 - Reads GBK and UTF-8 control files, so Chinese file names work.
 - Works without a server by opening a generated sample working copy.
 
 | Revision graph | Preferences |
 |---|---|
 | ![Revision graph](docs/screenshots/graph.png) | ![Preferences](docs/screenshots/preferences.png) |
+
+## Download
+
+Prebuilt binaries for 64-bit Windows 10 and 11 are on the
+[releases page](https://github.com/woolsen/cvs-desk/releases/latest). Download the
+`cvsdesk-*-windows-x64.zip`, extract it anywhere, and run `cvsdesk.exe`. The `cvs.exe` beside
+it is the standalone command-line client. The zip also holds `README.md`, `CHANGELOG.md`,
+`LICENSE`, `third-party-licenses.txt`, and the screenshots this file uses. No external CVS is
+required.
+
+The build is not code-signed yet, so Windows SmartScreen may warn about it. Each release
+includes `SHA256SUMS.txt`; compare the hash of the zip with it:
+
+```text
+Get-FileHash .\cvsdesk-*-windows-x64.zip -Algorithm SHA256
+```
+
+## Documentation
+
+- [The `cvs` program](https://github.com/woolsen/cvs-desk/blob/main/docs/CVS-CLIENT.md):
+  commands, connections, and the protocol details the client follows.
+- [CVS compatibility](https://github.com/woolsen/cvs-desk/blob/main/docs/CVS-COMPATIBILITY.md):
+  what is covered, and what is not.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release.
+- [Troubleshooting](#troubleshooting): graphics backend and logs.
+
+## Known limitations
+
+- Windows 10 or 11, 64-bit. The window needs a working OpenGL driver; see
+  [Troubleshooting](#troubleshooting) for the fallback.
+- `:local:` is not supported, and the client has no server mode, so it cannot read an RCS
+  repository without a server.
+- `:sspi:`, `:ntserver:`, `:kserver:`, `:gserver:`, and the pserver `proxy=` option are refused
+  with a clear message. `CVS_CLIENT_PORT`, Kerberos, and SSPI are not supported.
+- The window covers the common operations; the bundled `cvs.exe` has the full command line.
 
 ## Build
 
@@ -100,23 +96,56 @@ cargo test
 ```
 
 The client test runs the real `cvs.exe` against an in-process pserver, so it needs no network
-or account. See `tests/README.md` for the optional test against a real working copy.
+or account. [tests/README.md](https://github.com/woolsen/cvs-desk/blob/main/tests/README.md)
+describes the optional test against a real working copy.
+
+## Troubleshooting
+
+The window draws through OpenGL, which keeps memory use low. A remote desktop session or a
+virtual machine may offer no usable OpenGL, and then the window cannot open. Name another
+backend before starting the program:
+
+```text
+set WGPU_BACKEND=vulkan
+cvsdesk.exe
+```
+
+`WGPU_BACKEND=dx12` does the same on a machine whose Vulkan driver is missing. On one Intel
+integrated GPU the same window needed about 73 MB of private memory through OpenGL, against
+355 MB through DX12.
+
+CVS Desk keeps a log of what the program was doing: command phases, connection stages,
+counts, timings, and error kinds. It does not keep the user's data: no file contents, commit
+messages, passwords, CVSROOT/host/user, complete paths, or lists of files touched. A file
+name appears only when one file is the failing input.
+
+The log is `cvsdesk.log` under `%LOCALAPPDATA%\CVSDesk\logs`, rotated at 2 MB with two older
+files kept. **Help > Open Log Folder** shows it, and **Help > Copy Diagnostics** puts the
+program version and the most recent lines on the clipboard.
+
+`--log-level debug` adds per-phase detail, and `CVSDESK_LOG=debug` does the same for a start
+that cannot take a switch. The Preferences window can turn the same detail on for the next
+start. Old logs are removed after 14 days. A debug log beside a bug report is worth more than
+a description of the window alone.
 
 ## Contributing
 
-See `.github/CONTRIBUTING.md`. Bug reports and feature requests are welcome. Code contributions require
-a signed contributor license agreement so the project can also be offered under different
-commercial terms.
+See [CONTRIBUTING.md](https://github.com/woolsen/cvs-desk/blob/main/.github/CONTRIBUTING.md).
+Bug reports and feature requests are welcome. Security problems should go through
+[SECURITY.md](https://github.com/woolsen/cvs-desk/blob/main/SECURITY.md), not a public issue.
+Code contributions require a signed
+contributor license agreement so the project can also be offered under different commercial
+terms.
 
 ## License
 
 CVS Desk is licensed under the GNU Affero General Public License, version 3 only
-(`AGPL-3.0-only`). See `LICENSE` for the full text.
+(`AGPL-3.0-only`). See [LICENSE](LICENSE) for the full text.
 
 Third-party dependencies are listed in `Cargo.lock`; they are mostly MIT or Apache-2.0, with
-`encoding_rs` also under BSD-3-Clause. The file-type icons come from Remix Icon
-(Apache-2.0), and fixed-pitch text is set in JetBrains Mono (SIL OFL 1.1). Each component
-keeps its own license.
+`encoding_rs` also under BSD-3-Clause. The file-type icons come from Remix Icon (Apache-2.0),
+and fixed-pitch text is set in JetBrains Mono (SIL OFL 1.1). Each component keeps its own
+license.
 
 Commercial licensing for terms other than AGPL-3.0, and commercial support, are available
-separately: `woolsen@qq.com`.
+separately: [woolsen@qq.com](mailto:woolsen@qq.com).
