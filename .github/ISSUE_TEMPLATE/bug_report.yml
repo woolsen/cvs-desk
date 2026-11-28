@@ -1,0 +1,86 @@
+name: Bug report
+description: Something in CVS Desk does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Remove real account names, host names, passwords, `.cvspass`
+        contents, and `CVS/Root` files before posting. Security problems go to
+        [SECURITY.md](https://github.com/woolsen/cvs-desk/blob/main/SECURITY.md), not this form.
+
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: CVS Desk version
+      description: From Help > About, or from `cvsdesk.exe --version`.
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 23H2 (22631.4169)
+
+  - type: dropdown
+    id: server
+    attributes:
+      label: CVS server
+      description: Which server does the client talk to?
+      options:
+        - CVSNT
+        - CVS 1.11.x or another classic CVS
+        - Another server
+        - Not sure
+        - No server (sample working copy or a build issue)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it happen?
+      options:
+        - The window
+        - The bundled cvs.exe
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Help > Copy Diagnostics, or the most recent lines of `%LOCALAPPDATA%\CVSDesk\logs\cvsdesk.log`. A debug log helps; see the README.
+      render: text
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed passwords, account names, host names, and private repository paths from this report.
+          required: true
+        - label: I checked the README's known limitations and troubleshooting notes.
+          required: true
