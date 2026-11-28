@@ -4,6 +4,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::app::dialogs::Dialog;
+use crate::app::files::display_name;
 use crate::app::{App, OutputKind};
 
 /// How many folders the history keeps. A working session cannot exhaust this; the
@@ -152,9 +153,9 @@ impl App {
         }
     }
 
-    /// Opens a single selected folder. The folder tests use this to walk the list; the
-    /// window itself no longer binds it to a key.
-    #[cfg(test)]
+    /// Opens the one selected folder, as a double click on its row does. A folder that
+    /// is only a server name or a missing `D` record gets its empty control-file
+    /// skeleton first.
     pub(super) fn open_selected_folder(&mut self) {
         if self.selected.len() != 1 {
             return;
@@ -173,7 +174,7 @@ impl App {
         if path.is_dir() {
             self.go_to(path);
         } else {
-            self.status = format!("Folder is missing: {}", name);
+            self.ensure_and_open_dir(display_name(&name, true).to_string());
         }
     }
 

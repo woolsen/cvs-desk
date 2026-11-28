@@ -816,20 +816,65 @@ impl App {
         }
     }
 
-    /// Delete runs Move To Trash on the selection. A dialog owns the keyboard while it
-    /// is open, and so does a text field: there Delete edits text instead of rows.
-    fn delete_selected_by_key(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() || ctx.text_edit_focused() || self.selected.is_empty() {
+    /// The keys the file list answers to. A dialog owns the keyboard while it is open,
+    /// and a text field owns the keys that edit text. Ctrl+L and Ctrl+F still hand the
+    /// keyboard to a field, the way a browser does; Enter only acts while no widget has
+    /// it, so it cannot also press a focused button.
+    fn list_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.dialog.is_some() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
+            self.address = self.dir.display().to_string();
+            self.address_editing = true;
+            self.focus_address = true;
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.open_search();
+            return;
+        }
+        if ctx.text_edit_focused() {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)) {
-            self.move_to_trash();
+            if !self.selected.is_empty() {
+                self.move_to_trash();
+            }
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
+            self.go_back();
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight)) {
+            self.go_forward();
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp)) {
+            self.go_up();
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
+            self.reload();
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::U)) {
+            if self.root.trim().is_empty() {
+                self.status = "This folder is not a CVS working copy".into();
+            } else {
+                self.cvs_command(Cmd::Update);
+            }
+        } else if ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::C,
+            )
+        }) {
+            let paths = self.selected_visible_paths();
+            if !paths.is_empty() {
+                ctx.copy_text(paths.join("\n"));
+            }
+        } else if !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        {
+            self.open_selected_folder();
         }
     }
 
     pub(super) fn ui_file_list(&mut self, ui: &mut egui::Ui) {
         self.ensure_order();
-        self.delete_selected_by_key(ui.ctx());
+        self.list_shortcuts(ui.ctx());
         if !ui.ctx().egui_wants_keyboard_input()
             && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
         {
@@ -1148,12 +1193,7 @@ impl App {
                 ctx.copy_text(self.selected_visible_names().join("\n"));
             }
             FileMenuAction::CopyPath => {
-                let paths: Vec<String> = self
-                    .selected_visible_names()
-                    .iter()
-                    .map(|name| self.dir.join(name).display().to_string())
-                    .collect();
-                ctx.copy_text(paths.join("\n"));
+                ctx.copy_text(self.selected_visible_paths().join("\n"));
             }
             FileMenuAction::ShowInExplorer => {
                 let Some(row) = self.rows.get(index) else {
@@ -1460,14 +1500,18 @@ mod tests {
         assert_eq!(app.order, vec![0, 1], "closing the box drops the filter");
     }
 
-    fn delete_event() -> egui::Event {
+    fn press(modifiers: egui::Modifiers, key: egui::Key) -> egui::Event {
         egui::Event::Key {
-            key: egui::Key::Delete,
+            key,
             physical_key: None,
             pressed: true,
             repeat: false,
-            modifiers: egui::Modifiers::NONE,
+            modifiers,
         }
+    }
+
+    fn delete_event() -> egui::Event {
+        press(egui::Modifiers::NONE, egui::Key::Delete)
     }
 
     /// A real folder holding one file, so `move_to_trash` has something to hand to the
@@ -1565,6 +1609,193 @@ mod tests {
             "Delete in the address field must edit the text, not the selection"
         );
         assert_eq!(app.rows.len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn alt_left_and_right_walk_the_history() {
+        let root = folder_with_file("a.txt", "alt-history");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", false);
+        app.history = crate::app::nav::History::new(root.clone());
+        app.history.push(sub.clone());
+        app.dir = sub.clone();
+        app.address = sub.display().to_string();
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::ALT, egui::Key::ArrowLeft)],
+        );
+        assert_eq!(app.dir, root, "Alt+Left goes back");
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::ALT, egui::Key::ArrowRight)],
+        );
+        assert_eq!(app.dir, sub, "Alt+Right goes forward");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn alt_up_opens_the_parent_folder() {
+        let root = folder_with_file("a.txt", "alt-up");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&sub, "a.txt", false);
+        app.history = crate::app::nav::History::new(sub.clone());
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::ALT, egui::Key::ArrowUp)],
+        );
+
+        assert_eq!(app.dir, root);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn f5_reads_the_folder_again() {
+        let root = folder_with_file("a.txt", "f5-reload");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", true);
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::NONE, egui::Key::F5)],
+        );
+
+        assert!(
+            app.rows.is_empty(),
+            "a reload clears the list before the read"
+        );
+        assert_eq!(app.status, "Reading folder…");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ctrl_l_opens_the_address_bar_on_the_folder_shown() {
+        let root = folder_with_file("a.txt", "ctrl-l");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", true);
+        app.address = "C:\\elsewhere".into();
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::COMMAND, egui::Key::L)],
+        );
+
+        assert!(app.address_editing, "the field opens");
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(address_id()),
+            "and takes the keyboard"
+        );
+        assert_eq!(app.address, root.display().to_string());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ctrl_f_opens_the_search_box() {
+        let root = folder_with_file("a.txt", "ctrl-f");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", false);
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::COMMAND, egui::Key::F)],
+        );
+
+        assert!(app.search_open);
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(search_id()),
+            "the box takes the keyboard"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn enter_opens_the_selected_folder() {
+        let root = folder_with_file("a.txt", "enter-folder");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let ctx = list_ctx();
+        let mut app = app_with_rows(vec![row("sub", true)]);
+        app.dir = root.clone();
+        app.address = root.display().to_string();
+        app.history = crate::app::nav::History::new(root.clone());
+        app.selected = HashSet::from([0]);
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::NONE, egui::Key::Enter)],
+        );
+
+        assert_eq!(app.dir, sub);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ctrl_u_reaches_the_update_command() {
+        let root = folder_with_file("a.txt", "ctrl-u");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", true);
+        app.root = ":pserver:user@host:/repo".into();
+        // A running command makes `start` refuse, so the test sees the request arrive
+        // without opening a connection.
+        app.runner.running = true;
+
+        let _ = run_list(
+            &ctx,
+            &mut app,
+            vec![press(egui::Modifiers::COMMAND, egui::Key::U)],
+        );
+
+        assert!(
+            app.runner
+                .lines
+                .iter()
+                .any(|line| line == "Error : cvs is already running !"),
+            "Ctrl+U must reach the Update command: {:?}",
+            app.runner.lines
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_the_full_paths_of_the_selection() {
+        let root = folder_with_file("a.txt", "ctrl-shift-c");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", true);
+        app.rows.push(row("b.txt", false));
+        app.selected.insert(1);
+
+        let frame = run_list(
+            &ctx,
+            &mut app,
+            vec![press(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::C,
+            )],
+        );
+
+        let expected = format!(
+            "{}\n{}",
+            root.join("a.txt").display(),
+            root.join("b.txt").display()
+        );
+        assert_eq!(copied_text(&frame), Some(expected.as_str()));
         std::fs::remove_dir_all(&root).ok();
     }
 

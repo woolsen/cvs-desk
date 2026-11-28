@@ -589,6 +589,15 @@ impl App {
         names
     }
 
+    /// The full paths of the selected rows visible in the current view, in the same
+    /// order as [`Self::selected_visible_names`].
+    pub(super) fn selected_visible_paths(&self) -> Vec<String> {
+        self.selected_visible_names()
+            .iter()
+            .map(|name| self.dir.join(name).display().to_string())
+            .collect()
+    }
+
     /// The selected names that exist in the working copy and are visible. Commands such
     /// as update, commit or edit must not be given a name that is not checked out or
     /// hidden by the current view.
