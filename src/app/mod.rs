@@ -90,8 +90,8 @@ pub(super) struct HistoryWait {
     pub working_state: State,
     /// True when an open File History window asked for a refresh.
     pub refresh: bool,
-    /// True when the reply should open the diff window as well, as the file menu's
-    /// Diff does.
+    /// True when the reply should open only the Diff window, as the file menu's Diff
+    /// does, instead of the File History window.
     pub open_diff: bool,
 }
 
@@ -203,8 +203,8 @@ pub(crate) struct App {
     /// The pane the running command reports into. While it runs, only that pane follows
     /// its output.
     running_kind: Option<OutputKind>,
-    /// The file whose `cvs log` was asked for the File History window. When the command
-    /// finishes, the captured log is parsed and the window opens or refreshes.
+    /// The file whose `cvs log` was asked for the File History or Diff window. When the
+    /// command finishes, the captured log is parsed and the window opens or refreshes.
     history_waiting: Option<HistoryWait>,
     /// What the Tags window asked cvs for. Cleared when the window closes.
     tag_waiting: Option<TagWait>,

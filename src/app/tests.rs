@@ -748,7 +748,7 @@ fn a_finished_history_log_opens_the_history_window() {
 }
 
 #[test]
-fn a_right_click_diff_opens_the_history_with_the_diff_window() {
+fn a_right_click_diff_opens_the_diff_window_alone() {
     let mut app = app_with_rows(Vec::new());
     app.history_waiting = Some(HistoryWait {
         dir: app.dir.clone(),
@@ -772,14 +772,11 @@ fn a_right_click_diff_opens_the_history_with_the_diff_window() {
     app.poll();
 
     match app.dialog {
-        Some(Dialog::History(ref state)) => {
+        Some(Dialog::Diff(ref state)) => {
             assert_eq!(state.file(), "main.c");
-            assert!(
-                state.diff_is_open(),
-                "the diff window must open with the history"
-            );
+            assert!(state.diff_is_open(), "the diff window must open by itself");
         }
-        _ => panic!("the finished log should open the File History window"),
+        _ => panic!("the right-click Diff must not open the File History window"),
     }
 }
 

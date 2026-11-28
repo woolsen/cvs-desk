@@ -221,8 +221,8 @@ impl App {
         self.start(CommandRequest::new(Cmd::Update), OutputKind::Console);
     }
 
-    /// Read one file's log and open or refresh the File History window when the reply
-    /// arrives. The bottom pane keeps whatever the user was reading.
+    /// Read one file's log and open or refresh its window when the reply arrives. The
+    /// bottom pane keeps whatever the user was reading.
     pub(super) fn request_history(
         &mut self,
         dir: PathBuf,
@@ -264,7 +264,11 @@ impl App {
                 state.set_loading(true);
             }
         }
-        self.status = format!("Reading history of {}", file);
+        self.status = if open_diff {
+            format!("Reading diff of {}", file)
+        } else {
+            format!("Reading history of {}", file)
+        };
         self.history_waiting = Some(HistoryWait {
             dir,
             root,
@@ -307,9 +311,9 @@ impl App {
         );
     }
 
-    /// The file menu's Diff: one local file, read its log, then open the File History
-    /// window with the diff already showing the working revision against the file on
-    /// disk. The dialog is not a command, so the user lands on the comparison at once.
+    /// The file menu's Diff: one local file, read its log, then open the Diff window
+    /// with the working revision compared against the file on disk. The File History
+    /// list stays closed, so the user lands on the comparison at once.
     pub(super) fn diff_selected_file(&mut self) {
         if self.selection_is_all_remote() {
             self.status = "The selected rows are not checked out; check them out first".into();
@@ -552,8 +556,10 @@ impl App {
                     );
                     if wait.open_diff {
                         state.open_local_diff();
+                        self.open_dialog(Dialog::Diff(Box::new(state)));
+                    } else {
+                        self.open_dialog(Dialog::History(Box::new(state)));
                     }
-                    self.open_dialog(Dialog::History(Box::new(state)));
                 }
             }
             // Capture the flag before a tag refresh query overwrites it: the create or

@@ -2,8 +2,8 @@
 //!
 //! The left side is the revision list with its branch gutter, the right side is the
 //! selected revision. The diff opens as a floating window from the details' Diff button,
-//! and selecting a row reloads it through a separate preview worker, so the main cvs
-//! command slot stays free.
+//! or by itself from the file list's Diff entry, and selecting a row reloads it through
+//! a separate preview worker, so the main cvs command slot stays free.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -711,6 +711,26 @@ pub(super) fn show(
     action
 }
 
+/// Draw only the diff window, with no File History list beside it. The reply to the
+/// file's log still fills the version pickers, but the list never appears: the file
+/// list's Diff entry lands straight on the comparison.
+pub(super) fn show_diff(
+    ctx: &egui::Context,
+    state: &mut HistoryState,
+    globals: &[String],
+    raise: bool,
+) -> Option<DialogAction> {
+    state.tick(ctx, globals);
+    diff_window(ctx, state, raise);
+
+    if state.diff_open {
+        return None;
+    }
+    // The diff is this dialog's only window, so closing it closes the dialog.
+    ctx.request_repaint();
+    Some(DialogAction::Close)
+}
+
 fn history_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("file_history")
 }
@@ -1363,16 +1383,74 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
         let error = state.diff_error.clone();
         let view = &mut state.diff_view;
         let model = state.diff_model.as_ref();
-        ui.horizontal_wrapped(|ui| {
-            if let Some(side) =
-                version_combo(ui, "file_history_diff_left", &left_side, history, !demo)
-            {
-                picked_left = Some(side);
+
+        // One header row laid out like the body: the old version ends at the middle
+        // divider, the new version starts where the right column starts, and the
+        // buttons keep the right edge with the note beside them.
+        let width = ui.available_width();
+        let height = ui.spacing().interact_size.y;
+        let (row, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let divider = row.left() + view.divider_x(width);
+        // Half the nine-point drag spine plus half the arrow.
+        let gap = 12.0;
+        let left_zone = egui::Rect::from_min_max(row.min, egui::pos2(divider - gap, row.max.y));
+        let right_zone = egui::Rect::from_min_max(egui::pos2(divider + gap, row.min.y), row.max);
+
+        let mut left_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(left_zone)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        if let Some(side) = version_combo(
+            &mut left_ui,
+            "file_history_diff_left",
+            &left_side,
+            history,
+            !demo,
+            left_zone.width().clamp(96.0, 120.0),
+        ) {
+            picked_left = Some(side);
+        }
+
+        ui.painter().text(
+            egui::pos2(divider, row.center().y),
+            egui::Align2::CENTER_CENTER,
+            "→",
+            egui::FontId::proportional(13.0),
+            MUTED,
+        );
+
+        let mut right_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(right_zone)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        if let Some(model) = model {
+            DiffView::copy_menu(&mut right_ui, model);
+        }
+        if right_ui.button("Reload").clicked() {
+            reload = true;
+        }
+        if error.is_empty() {
+            if let Some(model) = model {
+                view.status(&mut right_ui, model);
             }
-            ui.label(egui::RichText::new("→").color(MUTED));
-            if let Some(side) =
-                version_combo(ui, "file_history_diff_right", &right_side, history, !demo)
-            {
+        }
+
+        // What is left of the right column: the new version, the loading or error note,
+        // then the change buttons when there is room for them beside the note.
+        right_ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let changes = model.is_some_and(|model| !model.hunks.is_empty());
+            let reserve = if changes { 100.0 } else { 0.0 };
+            let combo_w = (ui.available_width() - reserve).clamp(96.0, 120.0);
+            if let Some(side) = version_combo(
+                ui,
+                "file_history_diff_right",
+                &right_side,
+                history,
+                !demo,
+                combo_w,
+            ) {
                 picked_right = Some(side);
             }
             if loading {
@@ -1380,14 +1458,15 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
                 ui.label(egui::RichText::new("Loading…").small().color(MUTED));
             }
             if !error.is_empty() {
-                ui.colored_label(DEAD, &error);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&error).color(DEAD))
+                        .truncate()
+                        .halign(egui::Align::LEFT),
+                );
             }
-            if ui.small_button("Reload").clicked() {
-                reload = true;
-            }
-            if let Some(model) = model {
-                ui.separator();
-                view.header_controls(ui, model, focus_id.expect("a model has a focus id"));
+            if changes && ui.available_width() >= 96.0 {
+                let model = model.expect("the change buttons need a model");
+                view.navigation(ui, model, focus_id.expect("a model has a focus id"));
             }
         });
     }
@@ -1420,13 +1499,15 @@ fn diff(ui: &mut egui::Ui, state: &mut HistoryState) {
 }
 
 /// One version picker: the local file and every revision the log lists. `label`
-/// carries the revision's newest tag or its branch name.
+/// carries the revision's newest tag or its branch name. `width` lets a narrow window
+/// keep the change buttons beside the picker.
 fn version_combo(
     ui: &mut egui::Ui,
     id: &str,
     side: &Side,
     history: &History,
     enabled: bool,
+    width: f32,
 ) -> Option<Side> {
     let mut picked = None;
     let text = match side {
@@ -1436,7 +1517,7 @@ fn version_combo(
     ui.add_enabled_ui(enabled, |ui| {
         egui::ComboBox::from_id_salt(id)
             .selected_text(egui::RichText::new(text).monospace())
-            .width(120.0)
+            .width(width)
             .show_ui(ui, |ui| {
                 if ui
                     .selectable_label(*side == Side::WorkingCopy, "Local file")
@@ -1600,6 +1681,81 @@ mod tests {
             walk(&clipped.shape, &mut texts);
         }
         texts
+    }
+
+    /// The diff window's texts and painted rectangles, for layout assertions.
+    fn diff_layout(
+        state: &mut HistoryState,
+    ) -> (Vec<(String, egui::Rect)>, Vec<egui::epaint::RectShape>) {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 600.0),
+        ));
+        let output = crate::app::ui::test_run(&ctx, input, |ui| diff(ui, state));
+
+        fn walk(
+            shape: &egui::Shape,
+            texts: &mut Vec<(String, egui::Rect)>,
+            rects: &mut Vec<egui::epaint::RectShape>,
+        ) {
+            match shape {
+                egui::Shape::Text(text) => texts.push((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Rect(rect) => rects.push(rect.clone()),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, texts, rects);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        let mut rects = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts, &mut rects);
+        }
+        (texts, rects)
+    }
+
+    fn text_rect(texts: &[(String, egui::Rect)], needle: &str) -> egui::Rect {
+        texts
+            .iter()
+            .find(|(text, _)| text == needle)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("the diff window did not draw {needle:?}"))
+    }
+
+    /// The smallest painted box around a text: the button or combo it sits in.
+    fn widget_rect(rects: &[egui::epaint::RectShape], at: egui::Pos2) -> egui::Rect {
+        rects
+            .iter()
+            .filter(|rect| rect.rect.contains(at))
+            .min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()))
+            .map(|rect| rect.rect)
+            .unwrap_or_else(|| panic!("no box around {at:?}"))
+    }
+
+    /// The demo window with a saved diff whose two sides match.
+    fn demo_without_changes() -> HistoryState {
+        let mut state = HistoryState::demo(
+            std::path::PathBuf::from("."),
+            String::new(),
+            "main.c".into(),
+            "1.4".into(),
+            sample().history,
+        );
+        state.diff_model = Some(DiffModel::build(
+            FileText::from_text("main.c @ 1.4", "same\n", "c"),
+            FileText::from_text("@ 1.4", "same\n", "c"),
+            DiffOptions::default(),
+        ));
+        state
     }
 
     fn index_of(state: &HistoryState, revision: &str) -> usize {
@@ -1866,6 +2022,62 @@ mod tests {
         assert!(!state.diff_loading, "the spinner stops");
     }
 
+    fn window_layer(viewport: egui::ViewportId) -> egui::LayerId {
+        // `Window::from_viewport` names the area after the viewport, so the memory
+        // tells whether that window was shown in the pass.
+        egui::LayerId::new(egui::Order::Middle, egui::Id::unique(viewport))
+    }
+
+    #[test]
+    fn a_diff_dialog_draws_only_the_diff_window() {
+        let mut state = sample();
+        state.open_local_diff();
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 650.0),
+        ));
+
+        crate::app::ui::test_run(&ctx, input, |ui| {
+            let _ = show_diff(ui.ctx(), &mut state, &[], false);
+        });
+
+        let diff_shown = ctx.memory(|m| m.areas().is_visible(&window_layer(diff_viewport_id())));
+        let history_shown =
+            ctx.memory(|m| m.areas().is_visible(&window_layer(history_viewport_id())));
+        assert!(diff_shown, "the diff window must open");
+        assert!(
+            !history_shown,
+            "the diff must not bring its File History window"
+        );
+    }
+
+    #[test]
+    fn a_diff_dialog_closes_with_its_only_window() {
+        let mut state = sample();
+        state.open_local_diff();
+        state.set_diff_open(false);
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100.0, 650.0),
+        ));
+
+        let mut action = None;
+        crate::app::ui::test_run(&ctx, input, |ui| {
+            action = show_diff(ui.ctx(), &mut state, &[], false);
+        });
+
+        assert!(
+            matches!(action, Some(DialogAction::Close)),
+            "closing the diff window must close the dialog"
+        );
+    }
+
     #[test]
     fn a_prewarm_pass_keeps_the_diff_preview_idle() {
         let mut state = sample();
@@ -1992,6 +2204,53 @@ mod tests {
                 "the diff window did not draw {expected:?}: {texts:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_diff_header_puts_each_version_above_its_column() {
+        let mut state = demo_without_changes();
+        let (texts, rects) = diff_layout(&mut state);
+        let left = widget_rect(&rects, text_rect(&texts, "1.4").center());
+        let right = widget_rect(&rects, text_rect(&texts, "1.5").center());
+
+        assert!(
+            (460.0..500.0).contains(&left.right()),
+            "the old version does not end at the divider: {left:?}"
+        );
+        assert!(
+            (495.0..535.0).contains(&right.left()),
+            "the new version does not start at the right column: {right:?}"
+        );
+    }
+
+    #[test]
+    fn the_diff_header_ends_with_the_note_reload_and_copy() {
+        let mut state = demo_without_changes();
+        let (texts, rects) = diff_layout(&mut state);
+        let note = text_rect(&texts, "No changes.");
+        let reload = text_rect(&texts, "Reload");
+        let copy = text_rect(&texts, "Copy");
+
+        assert!(
+            note.right() <= reload.left(),
+            "the note is not left of Reload: {note:?} {reload:?}"
+        );
+        assert!(
+            reload.right() <= copy.left(),
+            "Reload is not left of Copy: {reload:?} {copy:?}"
+        );
+        assert!(
+            (note.center().y - copy.center().y).abs() < 1.0,
+            "the header controls sit on different lines: {note:?} {reload:?} {copy:?}"
+        );
+
+        let reload_box = widget_rect(&rects, reload.center());
+        let copy_box = widget_rect(&rects, copy.center());
+        assert_eq!(
+            reload_box.height(),
+            copy_box.height(),
+            "Reload is not the same height as Copy: {reload_box:?} {copy_box:?}"
+        );
     }
 
     #[test]

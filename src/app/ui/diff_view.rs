@@ -15,7 +15,8 @@
 //! share one horizontal offset while their line-number gutters stay pinned, which
 //! keeps long source lines readable without losing the line numbers. Only the rows
 //! in the viewport are interacted with or painted. The right-hand overview lane is
-//! the vertical scrollbar: it shows one mark per change and can be clicked or dragged.
+//! as tall as the diff itself: it shows one mark per change and can be clicked or
+//! dragged, and only marks the visible portion when the diff is taller than the pane.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -45,8 +46,10 @@ const DIVIDER: Color32 = Color32::from_rgb(0xE3, 0xE3, 0xE3);
 const DIVIDER_ACTIVE: Color32 = Color32::from_rgb(0x4A, 0x86, 0xC8);
 const TRACK: Color32 = Color32::from_rgb(0xF1, 0xF1, 0xF1);
 const THUMB: Color32 = Color32::from_rgb(0xC9, 0xC9, 0xC9);
+/// The overview lane is a translucent box rather than a bordered scrollbar, so a
+/// short diff leaves a short box and nothing that reads as a full-height scrollbar.
+const OVERVIEW_BG: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 9);
 const OVERVIEW_THUMB: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 18);
-const OVERVIEW_THUMB_BORDER: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 32);
 /// A change mark keeps its hue but lets the lane behind it show through. egui stores
 /// colours premultiplied, so the alpha is folded into each channel.
 const fn mark(r: u8, g: u8, b: u8, alpha: u8) -> Color32 {
@@ -154,7 +157,11 @@ impl DiffView {
             ui.label(egui::RichText::new("→").color(GUTTER_TEXT));
             ui.label(egui::RichText::new(&model.right.title).strong());
             ui.separator();
-            self.header_controls(ui, model, focus_id);
+            self.navigation(ui, model, focus_id);
+            self.status(ui, model);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                Self::copy_menu(ui, model);
+            });
         });
         self.show_body(ui, model, focus_id);
     }
@@ -215,12 +222,8 @@ impl DiffView {
         let mut body = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
         let bar_gap = body.spacing().item_spacing.y;
         let code_h = (body_rect.height() - SCROLLBAR_H - bar_gap).max(1.0);
-        let overview_w = if body_rect.width() >= 460.0 {
-            OVERVIEW_W
-        } else {
-            0.0
-        };
-        let code_w = (body_rect.width() - overview_w).max(120.0);
+        let overview_w = overview_width(body_rect.width());
+        let code_w = body_code_width(body_rect.width());
         let code_rect = Rect::from_min_size(body_rect.min, egui::vec2(code_w, code_h));
         let mut viewport = None;
 
@@ -239,7 +242,7 @@ impl DiffView {
                         ui.allocate_exact_size(egui::vec2(width, total_h), Sense::hover());
                     let top = content.top();
                     let left = content.left();
-                    let (left_column, right_column, divider_rect) = columns(content, self.split);
+                    let (left_column, right_column, _) = columns(content, self.split);
 
                     let start = ((view.min.y / row_h).floor() as usize).min(model.rows.len());
                     let end = ((view.max.y / row_h).ceil() as usize + 1).min(model.rows.len());
@@ -310,39 +313,6 @@ impl DiffView {
                         });
                     }
 
-                    // The divider is drawn after the rows, so it is never covered
-                    // by a row background. It is only one pixel wide; the nine-pixel
-                    // strip around it is the drag target.
-                    let divider = ui.interact(
-                        divider_rect,
-                        ui.scope_id().with("diff_divider"),
-                        Sense::click_and_drag(),
-                    );
-                    if divider.dragged() {
-                        if let Some(pointer) = divider.interact_pointer_pos() {
-                            self.split = ((pointer.x - left) / content.width()).clamp(0.2, 0.8);
-                        }
-                    }
-                    if divider.double_clicked() {
-                        self.split = 0.5;
-                    }
-                    if divider.hovered() || divider.dragged() {
-                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-                    }
-                    let line_color = if divider.hovered() || divider.dragged() {
-                        DIVIDER_ACTIVE
-                    } else {
-                        DIVIDER
-                    };
-                    let line_x = divider_rect.center().x;
-                    ui.painter().line_segment(
-                        [
-                            egui::pos2(line_x, content.top()),
-                            egui::pos2(line_x, content.bottom()),
-                        ],
-                        Stroke::new(1.0, line_color),
-                    );
-
                     if let Some(target) = self.scroll_to.take() {
                         let target = target.min(model.rows.len().saturating_sub(1));
                         let y = top + target as f32 * row_h;
@@ -363,6 +333,46 @@ impl DiffView {
             self.hscroll = self.hscroll.clamp(0.0, max_offset);
             horizontal_bar(&mut code_ui, &mut self.hscroll, max_offset, visible);
         }
+
+        // The divider belongs to the whole body, not to the rows: even a two-line
+        // diff reads as two columns. Paint it last so no row background, scrollbar or
+        // overview lane can cover it, and let the nine-point strip drag the split
+        // down to the bottom edge.
+        let line_x = body_rect.left() + self.divider_x(body_rect.width());
+        let divider_rect = Rect::from_min_size(
+            egui::pos2(line_x - SPINE_W * 0.5, body_rect.top()),
+            egui::vec2(SPINE_W, body_rect.height()),
+        );
+        let divider = body.interact(
+            divider_rect,
+            body.make_persistent_id("diff_divider"),
+            Sense::click_and_drag(),
+        );
+        if divider.dragged() {
+            if let Some(pointer) = divider.interact_pointer_pos() {
+                let usable = (code_w - SPINE_W).max(1.0);
+                let offset = pointer.x - body_rect.left() - SPINE_W * 0.5;
+                self.split = (offset / usable).clamp(0.2, 0.8);
+            }
+        }
+        if divider.double_clicked() {
+            self.split = 0.5;
+        }
+        if divider.hovered() || divider.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+        let line_color = if divider.hovered() || divider.dragged() {
+            DIVIDER_ACTIVE
+        } else {
+            DIVIDER
+        };
+        body.painter().line_segment(
+            [
+                egui::pos2(line_x, body_rect.top()),
+                egui::pos2(line_x, body_rect.bottom()),
+            ],
+            Stroke::new(1.0, line_color),
+        );
 
         if overview_w > 0.0 {
             if let Some(view) = viewport {
@@ -576,72 +586,86 @@ impl DiffView {
         TextPos { side, row, ch }
     }
 
-    /// The navigation controls the default header and the history window share.
-    /// The caller places them in its own horizontal row.
-    pub(crate) fn header_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        model: &DiffModel,
-        focus_id: egui::Id,
-    ) {
-        let mut target = None;
-        if !model.hunks.is_empty() {
-            if ui
-                .small_button("Prev")
-                .on_hover_text("Previous change")
-                .clicked()
-            {
-                let current = self
-                    .active_row()
-                    .and_then(|row| hunk_at(model, row))
-                    .map_or(model.hunks.len() - 1, |index| index.saturating_sub(1));
-                target = Some(model.hunks[current].first_row);
-                ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
-            }
-            if ui
-                .small_button("Next")
-                .on_hover_text("Next change")
-                .clicked()
-            {
-                let current = self
-                    .active_row()
-                    .and_then(|row| hunk_at(model, row))
-                    .map_or(0, |index| (index + 1).min(model.hunks.len() - 1));
-                target = Some(model.hunks[current].first_row);
-                ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
-            }
-            let changes = model.hunks.len();
-            ui.label(
-                egui::RichText::new(format!(
-                    "{changes} difference{}",
-                    if changes == 1 { "" } else { "s" }
-                ))
-                .small()
-                .color(DIFF_COUNT),
-            );
-        } else if model.stats.added == 0 && model.stats.removed == 0 && model.notices.is_empty() {
-            ui.label(
-                egui::RichText::new("No changes.")
-                    .small()
-                    .color(GUTTER_TEXT),
-            );
-        }
+    /// The x, from the left edge of a `width`-wide body, where the middle divider
+    /// runs. The history window's header uses it to sit each version picker above
+    /// its own column, so the header follows the split that is dragged below.
+    pub(crate) fn divider_x(&self, width: f32) -> f32 {
+        let usable = (body_code_width(width) - SPINE_W).max(1.0);
+        usable * self.split + SPINE_W * 0.5
+    }
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("Copy", |ui| {
-                if ui.button("Old version").clicked() {
-                    ui.ctx().copy_text(model.left.text.clone());
-                    ui.close();
-                }
-                if ui.button("New version").clicked() {
-                    ui.ctx().copy_text(model.right.text.clone());
-                    ui.close();
-                }
-            });
-        });
+    /// The Prev/Next controls. The caller places them in its own header row.
+    pub(crate) fn navigation(&mut self, ui: &mut egui::Ui, model: &DiffModel, focus_id: egui::Id) {
+        if model.hunks.is_empty() {
+            return;
+        }
+        let mut target = None;
+        if ui
+            .small_button("Prev")
+            .on_hover_text("Previous change")
+            .clicked()
+        {
+            let current = self
+                .active_row()
+                .and_then(|row| hunk_at(model, row))
+                .map_or(model.hunks.len() - 1, |index| index.saturating_sub(1));
+            target = Some(model.hunks[current].first_row);
+            ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
+        }
+        if ui
+            .small_button("Next")
+            .on_hover_text("Next change")
+            .clicked()
+        {
+            let current = self
+                .active_row()
+                .and_then(|row| hunk_at(model, row))
+                .map_or(0, |index| (index + 1).min(model.hunks.len() - 1));
+            target = Some(model.hunks[current].first_row);
+            ui.ctx().memory_mut(|memory| memory.request_focus(focus_id));
+        }
         if target.is_some() {
             self.scroll_to = target;
         }
+    }
+
+    /// The change count, or the no-changes note. The history window puts it beside
+    /// Reload and Copy; the test header puts it after the navigation buttons.
+    pub(crate) fn status(&self, ui: &mut egui::Ui, model: &DiffModel) {
+        // A right-to-left row already places the label's box at the right edge. Asking
+        // for the default right alignment would move the galley right by its own width,
+        // on top of the next button, so the text is placed from the box's left edge.
+        let label = if !model.hunks.is_empty() {
+            let changes = model.hunks.len();
+            let text = format!(
+                "{changes} difference{}",
+                if changes == 1 { "" } else { "s" }
+            );
+            egui::Label::new(egui::RichText::new(text).small().color(DIFF_COUNT))
+        } else if model.stats.added == 0 && model.stats.removed == 0 && model.notices.is_empty() {
+            egui::Label::new(
+                egui::RichText::new("No changes.")
+                    .small()
+                    .color(GUTTER_TEXT),
+            )
+        } else {
+            return;
+        };
+        ui.add(label.halign(egui::Align::LEFT));
+    }
+
+    /// The Copy menu: both complete versions, whichever way the diff is scrolled.
+    pub(crate) fn copy_menu(ui: &mut egui::Ui, model: &DiffModel) {
+        ui.menu_button("Copy", |ui| {
+            if ui.button("Old version").clicked() {
+                ui.ctx().copy_text(model.left.text.clone());
+                ui.close();
+            }
+            if ui.button("New version").clicked() {
+                ui.ctx().copy_text(model.right.text.clone());
+                ui.close();
+            }
+        });
     }
 
     fn notices(&self, ui: &mut egui::Ui, model: &DiffModel) {
@@ -668,40 +692,32 @@ impl DiffView {
         row_h: f32,
         viewport: Rect,
     ) {
-        // The lane runs the full height of the body, so it reaches the bottom edge
-        // beside the horizontal scrollbar instead of stopping above it.
-        let lane = Rect::from_min_size(
-            egui::pos2(body_rect.right() - OVERVIEW_W, body_rect.top()),
-            egui::vec2(OVERVIEW_W, body_rect.height()),
-        );
-        ui.painter().line_segment(
-            [
-                egui::pos2(lane.left(), lane.top()),
-                egui::pos2(lane.left(), lane.bottom()),
-            ],
-            Stroke::new(1.0, DIVIDER),
-        );
-
         let total_h = model.rows.len() as f32 * row_h;
         if total_h <= 0.0 {
             return;
         }
 
-        let visible_top = (viewport.min.y / total_h).clamp(0.0, 1.0);
-        let visible_bottom = (viewport.max.y / total_h).clamp(0.0, 1.0);
-        let thumb_top = lane.top() + visible_top * lane.height();
-        let thumb_bottom = lane.top() + visible_bottom * lane.height();
-        let thumb = Rect::from_min_max(
-            egui::pos2(lane.left() + 2.0, thumb_top),
-            egui::pos2(lane.right() - 2.0, (thumb_bottom).max(thumb_top + 8.0)),
+        // The lane previews the diff, not the window: two rows of code make a lane
+        // two rows tall. Only a diff taller than the pane fills the right edge.
+        let lane = Rect::from_min_size(
+            egui::pos2(body_rect.right() - OVERVIEW_W, body_rect.top()),
+            egui::vec2(OVERVIEW_W, total_h.min(body_rect.height()).max(1.0)),
         );
-        ui.painter().rect_filled(thumb, 0.0, OVERVIEW_THUMB);
-        ui.painter().rect_stroke(
-            thumb,
-            0.0,
-            Stroke::new(1.0, OVERVIEW_THUMB_BORDER),
-            egui::StrokeKind::Inside,
-        );
+        // A slightly translucent box, with no rule and no border: when everything
+        // fits there is nothing that reads as a full-height scrollbar.
+        ui.painter().rect_filled(lane, 0.0, OVERVIEW_BG);
+
+        if total_h > body_rect.height() {
+            let visible_top = (viewport.min.y / total_h).clamp(0.0, 1.0);
+            let visible_bottom = (viewport.max.y / total_h).clamp(0.0, 1.0);
+            let thumb_top = lane.top() + visible_top * lane.height();
+            let thumb_bottom = lane.top() + visible_bottom * lane.height();
+            let thumb = Rect::from_min_max(
+                egui::pos2(lane.left() + 2.0, thumb_top),
+                egui::pos2(lane.right() - 2.0, (thumb_bottom).max(thumb_top + 8.0)),
+            );
+            ui.painter().rect_filled(thumb, 0.0, OVERVIEW_THUMB);
+        }
 
         for (kind, y, h) in hunk_marks(model, lane.height()) {
             let mark = Rect::from_min_size(
@@ -871,6 +887,21 @@ fn mono_font(ui: &egui::Ui) -> FontId {
         .get(&egui::TextStyle::Monospace)
         .cloned()
         .unwrap_or_else(|| FontId::monospace(typography::MONO))
+}
+
+/// The overview lane only earns its width when the window can show two code columns
+/// beside it.
+fn overview_width(width: f32) -> f32 {
+    if width >= 460.0 {
+        OVERVIEW_W
+    } else {
+        0.0
+    }
+}
+
+/// The width the two code columns share, with the overview lane already taken out.
+fn body_code_width(width: f32) -> f32 {
+    (width - overview_width(width)).max(120.0)
 }
 
 fn columns(content: Rect, split: f32) -> (Rect, Rect, Rect) {
@@ -1929,8 +1960,129 @@ mod tests {
         assert_eq!(copied, Some("alpha\nbeta"));
     }
 
+    /// Every rectangle painted by one test frame.
+    fn rects(output: &egui::FullOutput) -> Vec<egui::epaint::RectShape> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<egui::epaint::RectShape>) {
+            match shape {
+                egui::Shape::Rect(rect) => out.push(rect.clone()),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// Every vertical line painted by one test frame.
+    fn vertical_lines(output: &egui::FullOutput) -> Vec<[egui::Pos2; 2]> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<[egui::Pos2; 2]>) {
+            match shape {
+                egui::Shape::LineSegment { points, .. } => out.push(*points),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out.into_iter()
+            .filter(|points| points[0].x == points[1].x)
+            .collect()
+    }
+
     #[test]
-    fn the_overview_lane_reaches_the_bottom_of_the_diff() {
+    fn the_divider_runs_to_the_bottom_of_the_pane() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let model = model("a\nb\nc\n", "a\nB\nc\n");
+        let mut view = DiffView::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, 600.0),
+        ));
+        let output = crate::app::ui::test_run(&ctx, input, |ui| {
+            view.show(ui, &model, 1);
+        });
+
+        // The header's own separator is a short vertical line, so the divider is the
+        // longest one. Three rows may only fill a few dozen points; the line must
+        // still reach the bottom edge.
+        let lines = vertical_lines(&output);
+        let divider = lines
+            .iter()
+            .max_by(|a, b| {
+                let a = (a[0].y - a[1].y).abs();
+                let b = (b[0].y - b[1].y).abs();
+                a.total_cmp(&b)
+            })
+            .expect("the diff drew no divider");
+        assert!(
+            divider[1].y >= 599.0,
+            "the divider stops above the bottom edge: {divider:?}"
+        );
+        assert!(
+            (divider[1].y - divider[0].y) > 300.0,
+            "the divider only spans the rows: {divider:?}"
+        );
+    }
+
+    #[test]
+    fn the_overview_lane_is_as_tall_as_the_diff() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let model = model("a\nb\nc\n", "a\nB\nc\n");
+
+        let lane = |height: f32| {
+            let mut view = DiffView::new();
+            let mut input = egui::RawInput::default();
+            input.screen_rect = Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, height),
+            ));
+            let output = crate::app::ui::test_run(&ctx, input, |ui| {
+                view.show(ui, &model, 1);
+            });
+            let lane = rects(&output)
+                .into_iter()
+                .find(|rect| rect.fill == OVERVIEW_BG)
+                .expect("the overview lane has no box");
+            assert!(
+                !vertical_lines(&output)
+                    .iter()
+                    .any(|points| points[0].x > lane.rect.left() - 2.0),
+                "the overview lane still has a rule of its own"
+            );
+            lane.rect
+        };
+
+        let short = lane(420.0);
+        let tall = lane(720.0);
+        assert_eq!(
+            short.height(),
+            tall.height(),
+            "the lane follows the window, not the diff: {short:?} {tall:?}"
+        );
+        assert!(
+            short.height() < 200.0,
+            "three rows made a full-height lane: {short:?}"
+        );
+    }
+
+    #[test]
+    fn a_fitting_diff_draws_no_overview_thumb() {
         let ctx = egui::Context::default();
         crate::app::ui::fonts::install(&ctx);
         let model = model("a\nb\nc\n", "a\nB\nc\n");
@@ -1944,41 +2096,29 @@ mod tests {
             view.show(ui, &model, 1);
         });
 
-        fn walk(shape: &egui::Shape, out: &mut Vec<[egui::Pos2; 2]>) {
-            match shape {
-                egui::Shape::LineSegment { points, .. } => out.push(*points),
-                egui::Shape::Vec(inner) => {
-                    for shape in inner {
-                        walk(shape, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut vertical = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut vertical);
-        }
-        let lane = vertical
-            .iter()
-            .filter(|points| points[0].x == points[1].x)
-            .max_by(|a, b| a[0].x.total_cmp(&b[0].x))
-            .expect("the overview lane has no divider");
         assert!(
-            lane[0].x > 880.0,
-            "the rightmost vertical line is not the overview lane: {lane:?}"
-        );
-        assert!(
-            lane[0].y.max(lane[1].y) >= 419.0,
-            "the overview lane stops short of the bottom: {lane:?}"
+            !rects(&output)
+                .iter()
+                .any(|rect| rect.fill == OVERVIEW_THUMB),
+            "a diff that fits drew a viewport thumb"
         );
     }
 
     #[test]
-    fn the_overview_marks_are_translucent_and_square() {
+    fn the_overview_boxes_have_no_border_and_square_corners() {
         let ctx = egui::Context::default();
         crate::app::ui::fonts::install(&ctx);
-        let model = model("a\nb\nc\n", "A\nb\nc");
+        let mut old = String::new();
+        let mut new = String::new();
+        for index in 0..80 {
+            old.push_str(&format!("line {index}\n"));
+            if index % 20 == 0 {
+                new.push_str(&format!("changed {index}\n"));
+            } else {
+                new.push_str(&format!("line {index}\n"));
+            }
+        }
+        let model = model(&old, &new);
         let mut view = DiffView::new();
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(Rect::from_min_size(
@@ -1988,22 +2128,7 @@ mod tests {
         let output = crate::app::ui::test_run(&ctx, input, |ui| {
             view.show(ui, &model, 1);
         });
-
-        fn walk(shape: &egui::Shape, out: &mut Vec<egui::epaint::RectShape>) {
-            match shape {
-                egui::Shape::Rect(rect) => out.push(rect.clone()),
-                egui::Shape::Vec(inner) => {
-                    for shape in inner {
-                        walk(shape, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut rects = Vec::new();
-        for clipped in &output.shapes {
-            walk(&clipped.shape, &mut rects);
-        }
+        let rects = rects(&output);
 
         let marks: Vec<_> = rects
             .iter()
@@ -2022,14 +2147,69 @@ mod tests {
             "a change mark still has rounded corners"
         );
 
-        let thumb = rects
+        let boxes: Vec<_> = rects
             .iter()
-            .find(|rect| rect.fill == OVERVIEW_THUMB)
-            .expect("the overview drew no viewport thumb");
+            .filter(|rect| [OVERVIEW_BG, OVERVIEW_THUMB].contains(&rect.fill))
+            .collect();
+        assert!(
+            boxes.iter().any(|rect| rect.fill == OVERVIEW_THUMB),
+            "a diff taller than the pane drew no viewport thumb"
+        );
+        for rect in boxes {
+            assert_eq!(
+                rect.stroke.width, 0.0,
+                "an overview box still draws a border"
+            );
+            assert_eq!(
+                rect.corner_radius,
+                egui::CornerRadius::ZERO,
+                "an overview box still has rounded corners"
+            );
+        }
+    }
+
+    #[test]
+    fn the_line_numbers_follow_the_rows() {
+        let ctx = egui::Context::default();
+        crate::app::ui::fonts::install(&ctx);
+        let model = model("a\nb\n", "a\nB\n");
+        let mut view = DiffView::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, 420.0),
+        ));
+        let output = crate::app::ui::test_run(&ctx, input, |ui| {
+            view.show(ui, &model, 1);
+        });
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(text) => out.push(text.galley.text().to_string()),
+                    egui::Shape::Vec(inner) => {
+                        for shape in inner {
+                            walk(shape, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            walk(&clipped.shape, &mut texts);
+        }
         assert_eq!(
-            thumb.corner_radius,
-            egui::CornerRadius::ZERO,
-            "the overview thumb still has rounded corners"
+            texts.iter().filter(|text| *text == "1").count(),
+            2,
+            "both sides need a line 1: {texts:?}"
+        );
+        assert_eq!(
+            texts.iter().filter(|text| *text == "2").count(),
+            2,
+            "both sides need a line 2: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text == "3"),
+            "two rows drew a third line number: {texts:?}"
         );
     }
 }

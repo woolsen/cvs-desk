@@ -51,6 +51,8 @@ pub(super) enum Dialog {
         text: String,
     },
     History(Box<history::HistoryState>),
+    /// A file's diff window opened on its own, without the File History list beside it.
+    Diff(Box<history::HistoryState>),
     About,
 }
 
@@ -118,6 +120,9 @@ impl App {
                 Dialog::CommandLine { text } => command_line::show(ctx, text, &cvsroot),
                 Dialog::History(state) => {
                     history::show(ctx, state, &history_globals, raise_windows)
+                }
+                Dialog::Diff(state) => {
+                    history::show_diff(ctx, state, &history_globals, raise_windows)
                 }
                 Dialog::About => about::show(ctx),
             }
