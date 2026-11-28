@@ -816,8 +816,20 @@ impl App {
         }
     }
 
+    /// Delete runs Move To Trash on the selection. A dialog owns the keyboard while it
+    /// is open, and so does a text field: there Delete edits text instead of rows.
+    fn delete_selected_by_key(&mut self, ctx: &egui::Context) {
+        if self.dialog.is_some() || ctx.text_edit_focused() || self.selected.is_empty() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)) {
+            self.move_to_trash();
+        }
+    }
+
     pub(super) fn ui_file_list(&mut self, ui: &mut egui::Ui) {
         self.ensure_order();
+        self.delete_selected_by_key(ui.ctx());
         if !ui.ctx().egui_wants_keyboard_input()
             && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
         {
@@ -1446,6 +1458,114 @@ mod tests {
         assert!(app.search.is_empty());
         app.ensure_order();
         assert_eq!(app.order, vec![0, 1], "closing the box drops the filter");
+    }
+
+    fn delete_event() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Delete,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// A real folder holding one file, so `move_to_trash` has something to hand to the
+    /// shell. `tag` keeps parallel tests off each other in the temp folder.
+    fn folder_with_file(name: &str, tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("cvsdesk-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(name), "one").unwrap();
+        root
+    }
+
+    fn app_in_folder(root: &Path, name: &str, selected: bool) -> App {
+        let mut app = app_with_rows(vec![row(name, false)]);
+        app.dir = root.to_path_buf();
+        app.address = root.display().to_string();
+        app.history = crate::app::nav::History::new(root.to_path_buf());
+        if selected {
+            app.selected = HashSet::from([0]);
+        }
+        app
+    }
+
+    #[test]
+    fn the_delete_key_moves_the_selected_rows_to_the_trash() {
+        let root = folder_with_file("a.txt", "delete-key");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", true);
+
+        let _ = run_list(&ctx, &mut app, vec![delete_event()]);
+
+        assert!(
+            !root.join("a.txt").exists(),
+            "Delete must hand the row to the trash"
+        );
+        assert!(
+            app.rows.is_empty(),
+            "an untracked file leaves the list once it is in the trash"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_delete_key_does_nothing_without_a_selection() {
+        let root = folder_with_file("a.txt", "delete-empty");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", false);
+
+        let _ = run_list(&ctx, &mut app, vec![delete_event()]);
+
+        assert!(
+            root.join("a.txt").exists(),
+            "a stray Delete deletes nothing"
+        );
+        assert!(
+            app.runner.lines.is_empty(),
+            "a stray Delete must not log a complaint: {:?}",
+            app.runner.lines
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_delete_key_leaves_the_rows_alone_while_a_dialog_is_open() {
+        let root = folder_with_file("a.txt", "delete-dialog");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", true);
+        app.dialog = Some(crate::app::dialogs::Dialog::About);
+
+        let _ = run_list(&ctx, &mut app, vec![delete_event()]);
+
+        assert!(
+            root.join("a.txt").exists(),
+            "the dialog owns the keyboard, not the list"
+        );
+        assert_eq!(app.rows.len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_delete_key_edits_the_address_bar_instead_of_the_rows() {
+        let root = folder_with_file("a.txt", "delete-address");
+        let ctx = list_ctx();
+        let mut app = app_in_folder(&root, "a.txt", true);
+        app.address_editing = true;
+        app.focus_address = true;
+
+        // The first frame hands the field the focus; the second one is the one that sees
+        // the Delete key arrive at it.
+        let _ = run_list(&ctx, &mut app, Vec::new());
+        let _ = run_list(&ctx, &mut app, vec![delete_event()]);
+
+        assert!(
+            root.join("a.txt").exists(),
+            "Delete in the address field must edit the text, not the selection"
+        );
+        assert_eq!(app.rows.len(), 1);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn list_ctx() -> egui::Context {
