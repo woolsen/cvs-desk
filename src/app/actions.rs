@@ -1181,6 +1181,13 @@ fn command_error(lines: &[String]) -> String {
     lines
         .iter()
         .find(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("Logging in to ")
+                || trimmed.starts_with("cvs server: Updating ")
+                || trimmed.starts_with("cvs checkout: Updating ")
+            {
+                return false;
+            }
             let lower = line.to_ascii_lowercase();
             lower.contains("aborted")
                 || lower.contains("failed")
@@ -1217,6 +1224,30 @@ mod tests {
     fn a_checkout_progress_line_is_not_the_error() {
         let lines = vec![
             "cvs server: Updating error_module".to_string(),
+            "cvs [checkout aborted]: cannot find module".to_string(),
+        ];
+        assert_eq!(
+            command_error(&lines),
+            "cvs [checkout aborted]: cannot find module"
+        );
+    }
+
+    #[test]
+    fn a_failed_path_does_not_make_the_greeting_the_error() {
+        let lines = vec![
+            "Logging in to :pserver:ann@host:/failed-builds/repo".to_string(),
+            "cvs [login aborted]: authorization failed".to_string(),
+        ];
+        assert_eq!(
+            command_error(&lines),
+            "cvs [login aborted]: authorization failed"
+        );
+    }
+
+    #[test]
+    fn a_failed_module_name_does_not_make_progress_the_error() {
+        let lines = vec![
+            "cvs server: Updating failed_tests".to_string(),
             "cvs [checkout aborted]: cannot find module".to_string(),
         ];
         assert_eq!(

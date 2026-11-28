@@ -1234,6 +1234,7 @@ fn a_stopped_checkout_returns_with_its_fields() {
     dialog.module = "proj".into();
     app.pending_checkout = Some(checkout::pending_for_test(dialog, &base));
     app.checkout_waiting = Some(base.join("proj"));
+    app.refresh_after_command = true;
     app.runner.running = true;
     app.stop();
 
@@ -1247,6 +1248,10 @@ fn a_stopped_checkout_returns_with_its_fields() {
     };
     assert!(state.warning.contains("stopped"), "{}", state.warning);
     assert!(app.pending_checkout.is_none());
+    assert!(
+        app.loading.is_none(),
+        "a stopped checkout must not re-read the folder"
+    );
 
     let _ = fs::remove_dir_all(&base);
 }
@@ -1280,6 +1285,38 @@ fn a_stopped_login_returns_to_the_checkout_window() {
     assert!(state.warning.contains("Login stopped"), "{}", state.warning);
 
     let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_stopped_module_list_warns_in_the_open_window() {
+    let mut app = app_with_rows(Vec::new());
+    app.dialog = Some(Dialog::Checkout(Box::new(CheckoutDialog::new(
+        "",
+        false,
+        ":pserver:ann@host:/repo".into(),
+    ))));
+    app.module_list_waiting = true;
+    app.refresh_after_command = true;
+    app.runner.running = true;
+    app.stop();
+
+    let (tx, rx) = channel();
+    app.rx = Some(rx);
+    tx.send(Msg::Done(1)).unwrap();
+    app.poll();
+
+    let Some(Dialog::Checkout(state)) = app.dialog.as_ref() else {
+        panic!("the module list must not close the window");
+    };
+    assert!(
+        state.warning.contains("Module list stopped"),
+        "{}",
+        state.warning
+    );
+    assert!(
+        app.loading.is_none(),
+        "a stopped module list must not re-read the folder"
+    );
 }
 
 #[test]

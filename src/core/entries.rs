@@ -648,49 +648,92 @@ pub fn build_cvsroot(
     s
 }
 
+/// The root to keep: parsed and stripped of a password when possible, otherwise the
+/// lenient redaction. A valid local path or a path containing `@` is never rewritten.
+pub fn clean_root(root: &str) -> String {
+    let root = root.trim();
+    if root.is_empty() {
+        return String::new();
+    }
+    if !root.starts_with(':') {
+        if let Some((token, _)) = root.split_once(':') {
+            if ConnKind::from_token(token).is_some_and(ConnKind::remote) {
+                return redact_root_password(root);
+            }
+        }
+    }
+    crate::client::root::Root::parse(root)
+        .map(|parsed| parsed.key)
+        .unwrap_or_else(|_| redact_root_password(root))
+}
+
 /// Remove a password from a CVSROOT even when the rest of the root is malformed, so an
 /// error message or a settings file can never carry one. The text around the password is
 /// left exactly as it was.
 pub fn redact_root_password(raw: &str) -> String {
     let raw = raw.trim();
-    let Some(stripped) = raw.strip_prefix(':') else {
+    let (kind, head_len, rest) = if let Some(stripped) = raw.strip_prefix(':') {
+        let Some(end) = stripped.find(':') else {
+            return raw.to_string();
+        };
+        let token = &stripped[..end];
+        let kind = ConnKind::ALL
+            .iter()
+            .find(|kind| kind.token() == token)
+            .copied()
+            .unwrap_or(ConnKind::Pserver);
+        (kind, end + 2, &raw[end + 2..])
+    } else {
+        let Some((token, rest)) = raw.split_once(':') else {
+            return raw.to_string();
+        };
+        let Some(kind) = ConnKind::from_token(token) else {
+            return raw.to_string();
+        };
+        (kind, token.len() + 1, rest)
+    };
+    if !kind.remote() {
+        return raw.to_string();
+    }
+    let (proxy, rest) = split_proxy_prefix(rest);
+    let Some((before, after)) = redact_userinfo(rest) else {
         return raw.to_string();
     };
-    let Some(method_end) = stripped.find(':') else {
-        return raw.to_string();
-    };
-    let rest_start = method_end + 2;
-    let rest = &raw[rest_start..];
-    // A proxy is written before the userinfo; keep it as it is and redact only the
-    // account part that follows.
-    let (prefix, rest) = match rest.strip_prefix("proxy=") {
-        Some(after) => {
-            let Some(host_end) = after.find(':') else {
-                return raw.to_string();
-            };
-            let Some(port_end) = after[host_end + 1..].find(':') else {
-                return raw.to_string();
-            };
-            let end = "proxy=".len() + host_end + 1 + port_end + 1;
-            (&rest[..end], &rest[end..])
-        }
-        None => ("", rest),
-    };
+    format!("{}{}{}{}", &raw[..head_len], proxy, before, after)
+}
+
+/// The part before a password colon, and the part from the `@` after it.
+fn redact_userinfo(rest: &str) -> Option<(String, String)> {
     let path_start = rest.find('/').unwrap_or(rest.len());
-    let Some(at) = rest[..path_start].rfind('@') else {
-        return raw.to_string();
-    };
+    let at = rest[..path_start].find('@')?;
     let info = &rest[..at];
-    let Some(colon) = info.find(':') else {
-        return raw.to_string();
+    let colon = info.find(':')?;
+    Some((rest[..colon].to_string(), rest[at..].to_string()))
+}
+
+/// Split a leading `proxy=HOST[:PORT]:` from a root's remaining text.
+fn split_proxy_prefix(rest: &str) -> (&str, &str) {
+    let Some(after) = rest.strip_prefix("proxy=") else {
+        return ("", rest);
     };
-    format!(
-        "{}{}{}{}",
-        &raw[..rest_start],
-        prefix,
-        &rest[..colon],
-        &rest[at..]
-    )
+    let Some(host_end) = after.find(':') else {
+        return ("", rest);
+    };
+    let after_host = &after[host_end + 1..];
+    let end = match after_host.find(':') {
+        Some(second) => {
+            let port = &after_host[..second];
+            if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+                // proxy=HOST:PORT:
+                "proxy=".len() + host_end + 1 + second + 1
+            } else {
+                // proxy=HOST:userinfo... (no port)
+                "proxy=".len() + host_end + 1
+            }
+        }
+        None => "proxy=".len() + host_end + 1,
+    };
+    (&rest[..end], &rest[end..])
 }
 
 /// Pull the pieces of an existing CVSROOT string back out, so the dialog can show them.
@@ -727,12 +770,12 @@ pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
             rest.to_string(),
         );
     }
-    // A proxy is written before the userinfo: `proxy=HOST:PORT:user@host[:port]:path`.
-    rest = strip_proxy(rest);
+    // A proxy is written before the userinfo: `proxy=HOST[:PORT]:user@host[:port]:path`.
+    rest = split_proxy_prefix(rest).1;
     // The userinfo ends at the first slash. A Windows path may have no slash, so the host
     // splitter below finds the path after the host.
     let path_start = rest.find('/').unwrap_or(rest.len());
-    let (userinfo, host_start) = match rest[..path_start].rfind('@') {
+    let (userinfo, host_start) = match rest[..path_start].find('@') {
         Some(at) => (&rest[..at], at + 1),
         None => ("", 0),
     };
@@ -755,20 +798,6 @@ pub fn parse_cvsroot(root: &str) -> (ConnKind, String, String, String, String) {
         port.unwrap_or("").to_string(),
         path.to_string(),
     )
-}
-
-/// Drop a leading `proxy=HOST:PORT:` from a root's remaining text.
-fn strip_proxy(rest: &str) -> &str {
-    let Some(after) = rest.strip_prefix("proxy=") else {
-        return rest;
-    };
-    let Some(host_end) = after.find(':') else {
-        return rest;
-    };
-    let Some(port_end) = after[host_end + 1..].find(':') else {
-        return rest;
-    };
-    &after[host_end + 1 + port_end + 1..]
 }
 
 /// Best-effort local-time string for display, used by the status bar.
@@ -1015,6 +1044,45 @@ mod tests {
             ":pserver:ann@host:/repo"
         );
         assert_eq!(redact_root_password("C:\\work"), "C:\\work");
+    }
+
+    #[test]
+    fn a_valid_root_with_an_at_in_the_path_is_not_corrupted() {
+        assert_eq!(
+            clean_root(":pserver:ann@host:C:\\repos\\team@corp\\repo"),
+            ":pserver:ann@host:C:\\repos\\team@corp\\repo"
+        );
+        assert_eq!(
+            clean_root(":local:C:\\Users\\ann@company.com\\repo"),
+            ":local:C:\\Users\\ann@company.com\\repo"
+        );
+    }
+
+    #[test]
+    fn a_malformed_proxy_password_is_redacted() {
+        assert_eq!(
+            clean_root(":pserver:proxy=proxyhost:ann:secret@host:/repo"),
+            ":pserver:proxy=proxyhost:ann@host:/repo"
+        );
+    }
+
+    #[test]
+    fn a_root_without_its_leading_colon_is_still_redacted() {
+        assert_eq!(
+            clean_root("pserver:ann:secret@host:/repo"),
+            "pserver:ann@host:/repo"
+        );
+    }
+
+    #[test]
+    fn a_path_with_an_at_sign_keeps_its_host_and_path() {
+        let (kind, user, host, port, path) =
+            parse_cvsroot(":pserver:ann@host:C:\\repos\\team@corp\\repo");
+        assert_eq!(kind, ConnKind::Pserver);
+        assert_eq!(user, "ann");
+        assert_eq!(host, "host");
+        assert!(port.is_empty());
+        assert_eq!(path, "C:\\repos\\team@corp\\repo");
     }
 
     #[test]

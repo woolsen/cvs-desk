@@ -14,7 +14,7 @@ pub(super) fn split_root(raw: &str) -> (String, Option<String>) {
                 .flatten();
             (root.key, password)
         }
-        Err(_) => (cvsdesk::entries::redact_root_password(raw), None),
+        Err(_) => (cvsdesk::entries::clean_root(raw), None),
     }
 }
 
@@ -44,10 +44,7 @@ pub(super) fn is_pserver(root: &str) -> bool {
 /// Whether the root text itself carries a password, even when the rest is malformed.
 pub(super) fn has_password(root: &str) -> bool {
     let root = root.trim();
-    match Root::parse(root) {
-        Ok(root) => root.password.is_some(),
-        Err(_) => cvsdesk::entries::redact_root_password(root) != root,
-    }
+    cvsdesk::entries::clean_root(root) != root
 }
 
 #[cfg(test)]

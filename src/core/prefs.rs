@@ -234,7 +234,7 @@ impl Prefs {
         let text = |value: &str| Value::String(value.to_string());
         table.insert(
             "P_Cvsroot".into(),
-            text(&crate::entries::redact_root_password(&self.cvsroot)),
+            text(&crate::entries::clean_root(&self.cvsroot)),
         );
         table.insert(
             "P_OldCvsroots".into(),
@@ -353,9 +353,10 @@ impl Prefs {
         if root.is_empty() {
             return;
         }
-        let root = crate::client::root::Root::parse(root)
-            .map(|root| root.key)
-            .unwrap_or_else(|_| crate::entries::redact_root_password(root));
+        let root = crate::entries::clean_root(root);
+        if root.is_empty() {
+            return;
+        }
         self.cvsroot = root.clone();
         Prefs::remember(&mut self.recent_roots, &root);
     }
@@ -364,7 +365,7 @@ impl Prefs {
     fn cleaned_recent_roots(&self) -> Vec<String> {
         self.recent_roots
             .iter()
-            .map(|root| crate::entries::redact_root_password(root))
+            .map(|root| crate::entries::clean_root(root))
             .filter(|root| !root.trim().is_empty())
             .collect()
     }
@@ -378,7 +379,7 @@ impl Prefs {
         update_settings(|table| {
             table.insert(
                 "P_Cvsroot".into(),
-                Value::String(crate::entries::redact_root_password(&self.cvsroot)),
+                Value::String(crate::entries::clean_root(&self.cvsroot)),
             );
             table.insert(
                 "P_OldCvsroots".into(),
@@ -499,11 +500,11 @@ impl Prefs {
 
     /// Remove a password that an older settings file may carry in a root.
     fn scrub_roots(&mut self) {
-        self.cvsroot = crate::entries::redact_root_password(&self.cvsroot);
+        self.cvsroot = crate::entries::clean_root(&self.cvsroot);
         self.recent_roots = self
             .recent_roots
             .iter()
-            .map(|root| crate::entries::redact_root_password(root))
+            .map(|root| crate::entries::clean_root(root))
             .filter(|root| !root.trim().is_empty())
             .collect();
     }
@@ -1127,6 +1128,21 @@ mod tests {
         let text = p.to_toml();
         assert!(!text.contains("secret"), "{text}");
         assert!(text.contains(":pserver:ann@host:/repo"));
+    }
+
+    #[test]
+    fn a_valid_root_with_an_at_in_the_path_survives_a_settings_round_trip() {
+        let root = ":pserver:ann@host:C:\\repos\\team@corp\\repo";
+        let local = ":local:C:\\Users\\ann@company.com\\repo";
+        let mut p = Prefs::default();
+        p.cvsroot = root.into();
+        p.recent_roots = vec![root.into(), local.into()];
+
+        let text = p.to_toml();
+        assert!(text.contains("team@corp"), "{text}");
+        let back = Prefs::from_toml(&text).expect("toml");
+        assert_eq!(back.cvsroot, root);
+        assert_eq!(back.recent_roots, vec![root, local]);
     }
 
     #[test]

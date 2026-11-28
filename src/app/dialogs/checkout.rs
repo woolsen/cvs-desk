@@ -35,6 +35,10 @@ pub(crate) struct CheckoutDialog {
     /// window shows; a failed checkout pins it so a navigation during the command cannot
     /// move the retry elsewhere.
     pub base: Option<PathBuf>,
+    /// The root of the working copy at `base`, kept with a pinned target.
+    pub base_root: Option<String>,
+    /// Whether `base` was a working copy when a failed checkout pinned it.
+    pub base_has_cvs: Option<bool>,
 }
 
 /// A failed checkout's target. The module and root are part of the key: a retry may only
@@ -59,6 +63,8 @@ impl CheckoutDialog {
             confirmed: None,
             retry: None,
             base: None,
+            base_root: None,
+            base_has_cvs: None,
         }
     }
 
@@ -183,6 +189,7 @@ pub(super) fn show(
     busy: bool,
 ) -> Option<DialogAction> {
     let base = state.base.clone().unwrap_or_else(|| base.to_path_buf());
+    let has_cvs = state.base_has_cvs.unwrap_or(has_cvs);
     let old_root = state.root.clone();
     let old_module = state.module.clone();
     let before = (
@@ -311,7 +318,7 @@ pub(super) fn show(
                         }
                         DestinationCheck::RefuseFile => line.push_str(" — a file is in the way"),
                         DestinationCheck::RefuseMetadata => {
-                            line.push_str(" — a CVS metadata folder");
+                            line.push_str(" — a CVS metadata entry");
                         }
                         DestinationCheck::Confirm => line.push_str(" — not empty"),
                         DestinationCheck::Ready => {}
@@ -487,17 +494,22 @@ fn destination_check(
     if target.is_file() {
         return DestinationCheck::RefuseFile;
     }
-    if target
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("CVS"))
-    {
+    if target.components().any(|part| {
+        part.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("CVS")
+    }) {
+        return DestinationCheck::RefuseMetadata;
+    }
+    let cvs = target.join("CVS");
+    if cvs.exists() && !cvs.is_dir() {
         return DestinationCheck::RefuseMetadata;
     }
     // A folder that already holds CVS belongs to another working copy. The one exception
     // is the folder this same request just created before it failed: retrying it is fine.
     let retrying = retry
         .is_some_and(|retry| retry.path == target && retry.root == root && retry.module == module);
-    if target.join("CVS").is_dir() && !retrying {
+    if cvs.is_dir() && !retrying {
         return DestinationCheck::RefuseWorkingCopy;
     }
     if target.is_dir() && !is_empty_dir(target) && confirmed != Some(target) {
@@ -519,10 +531,12 @@ fn effective_root(app: &App, state: &CheckoutDialog) -> String {
     if !typed.is_empty() {
         return typed.to_string();
     }
-    if app.has_cvs {
-        return app.root.trim().to_string();
-    }
-    String::new()
+    state
+        .base_root
+        .clone()
+        .unwrap_or_else(|| cvsdesk::entries::clean_root(&app.root))
+        .trim()
+        .to_string()
 }
 
 /// Validate the fields, then start a login (when a password was given) or the checkout.
@@ -533,13 +547,18 @@ pub(crate) fn apply(app: &mut App, d: Dialog) -> Option<Dialog> {
     };
     let mut state = *state;
     let base = state.base.clone().unwrap_or_else(|| app.dir.clone());
+    let base_has_cvs = state.base_has_cvs.unwrap_or(app.has_cvs);
+    let base_root = state
+        .base_root
+        .clone()
+        .unwrap_or_else(|| cvsdesk::entries::clean_root(&app.root));
     if app.runner.running {
         state.warning = "cvs is already running; wait for it to finish.".into();
         return Some(Dialog::Checkout(Box::new(state)));
     }
     let root_text = effective_root(app, &state);
     if root_text.trim().is_empty() {
-        state.warning = if app.has_cvs {
+        state.warning = if base_has_cvs {
             "This working copy has no CVS/Root. Enter a repository.".into()
         } else {
             "Enter a repository, or open a CVS working copy.".into()
@@ -569,7 +588,7 @@ pub(crate) fn apply(app: &mut App, d: Dialog) -> Option<Dialog> {
         }
         DestinationCheck::RefuseMetadata => {
             state.warning = format!(
-                "{} is a CVS metadata folder. Choose another folder.",
+                "{} is, or contains, a CVS metadata entry. Choose another folder.",
                 target.dir.display()
             );
             return Some(Dialog::Checkout(Box::new(state)));
@@ -583,7 +602,7 @@ pub(crate) fn apply(app: &mut App, d: Dialog) -> Option<Dialog> {
         }
         DestinationCheck::Confirm => {
             state.confirmed = Some(target.dir.clone());
-            let nested = app.has_cvs && target.dir.starts_with(&base) && target.dir != base;
+            let nested = base_has_cvs && target.dir.starts_with(&base) && target.dir != base;
             state.warning = if nested {
                 format!(
                     "{} is not empty and sits inside the working copy on screen. Click Checkout again to use it.",
@@ -599,7 +618,7 @@ pub(crate) fn apply(app: &mut App, d: Dialog) -> Option<Dialog> {
         }
         DestinationCheck::Ready => {}
     }
-    let nested = app.has_cvs
+    let nested = base_has_cvs
         && target.dir.starts_with(&base)
         && target.dir != base
         && state.confirmed.as_deref() != Some(target.dir.as_path());
@@ -624,6 +643,8 @@ pub(crate) fn apply(app: &mut App, d: Dialog) -> Option<Dialog> {
     state.root = root.clone();
     state.password.clear();
     state.base = Some(base.clone());
+    state.base_has_cvs = Some(base_has_cvs);
+    state.base_root = Some(base_root);
     app.prefs.remember_root(&root);
     let pending = PendingCheckout {
         dialog: state,
@@ -736,11 +757,20 @@ pub(super) fn list_modules(app: &mut App) {
     let Some(Dialog::Checkout(state)) = app.dialog.as_ref() else {
         return;
     };
-    let (root, password) = connection::password_for(&state.root, &state.password);
-    if root.trim().is_empty() && !app.has_cvs {
-        warn_dialog(app, "Enter a repository, or open a CVS working copy.");
+    let root_text = effective_root(app, state);
+    let base_has_cvs = state.base_has_cvs.unwrap_or(app.has_cvs);
+    if root_text.trim().is_empty() {
+        warn_dialog(
+            app,
+            if base_has_cvs {
+                "This working copy has no CVS/Root. Enter a repository."
+            } else {
+                "Enter a repository, or open a CVS working copy."
+            },
+        );
         return;
     }
+    let (root, password) = connection::password_for(&root_text, &state.password);
     let password = if connection::is_pserver(&root) {
         password
     } else {
@@ -981,6 +1011,41 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_base_keeps_its_working_copy_context() {
+        let base = temp_dir("checkout-pinned");
+        let app_base = temp_dir("checkout-pinned-app");
+        let mut app = crate::app::tests::app_with_rows(Vec::new());
+        app.dir = app_base.clone();
+        app.has_cvs = false;
+        app.root.clear();
+
+        let mut state = CheckoutDialog::new("", false, ROOT.into());
+        state.module = MODULE.into();
+        state.folder = "sub".into();
+        state.base = Some(base.clone());
+        state.base_has_cvs = Some(true);
+        state.base_root = Some(ROOT.into());
+
+        let returned = apply(&mut app, Dialog::Checkout(Box::new(state)));
+
+        let Some(Dialog::Checkout(state)) = returned else {
+            panic!("the window must stay open for the nested confirmation");
+        };
+        assert!(
+            state.warning.contains("inside the working copy"),
+            "{}",
+            state.warning
+        );
+        assert!(
+            !app.runner.running,
+            "nothing may run before the user confirms"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&app_base).ok();
+    }
+
+    #[test]
     fn a_file_in_the_target_path_is_refused() {
         let base = temp_dir("checkout-file");
         let target = base.join("proj");
@@ -998,6 +1063,31 @@ mod tests {
         let target = base.join("CVS");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("Root"), b"x").unwrap();
+        assert_eq!(
+            destination_check(&target, None, None, ROOT, MODULE),
+            DestinationCheck::RefuseMetadata
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_target_inside_a_cvs_folder_is_refused() {
+        let base = temp_dir("checkout-metadata-inside");
+        let target = base.join("CVS").join("proj");
+        std::fs::create_dir_all(&target).unwrap();
+        assert_eq!(
+            destination_check(&target, None, None, ROOT, MODULE),
+            DestinationCheck::RefuseMetadata
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_cvs_file_in_the_target_is_refused() {
+        let base = temp_dir("checkout-metadata-file");
+        let target = base.join("proj");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("CVS"), b"x").unwrap();
         assert_eq!(
             destination_check(&target, None, None, ROOT, MODULE),
             DestinationCheck::RefuseMetadata
@@ -1035,6 +1125,20 @@ mod tests {
 
         state.root = ":pserver:bob@host:/repo".into();
         assert_eq!(effective_root(&app, &state), ":pserver:bob@host:/repo");
+    }
+
+    #[test]
+    fn a_pinned_base_keeps_its_own_root() {
+        let mut app = crate::app::tests::app_with_rows(Vec::new());
+        app.has_cvs = false;
+        app.root.clear();
+        let mut state = CheckoutDialog::new("", false, String::new());
+        state.base_root = Some(":pserver:base@host:/repo".into());
+        assert_eq!(
+            effective_root(&app, &state),
+            ":pserver:base@host:/repo",
+            "a retry after navigation still uses the working copy it came from"
+        );
     }
 
     #[test]
